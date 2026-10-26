@@ -72,10 +72,10 @@ up to date at the end of every milestone.
 
 - **Version**: 0.1.0 set by hand in `package.json`, `package-lock.json`, the
   manifest and the `docker_image` tag; the first Release (patch) gives 0.1.1.
-- **SDK**: `^0.15.0`. The template asked for `^0.16.0`, not on npm on
-  2026-10-25 (0.15.0 is the latest published): migration to 0.16 planned with
-  the first migration wave, with `keywords`, `countries` and
-  `gladys_version >= 5.3.0` (see `_lots/veille.md`).
+- **SDK `^0.16.0`** (2026-10-26, migration wave 1): 0.16.0 is on npm since
+  2026-10-25 (a stale npm cache said otherwise); it adds the ai, tts and music
+  types; no effect here (`should_poll` explicit or `poll_frequency` unused). `keywords`, `countries` and `gladys_version >= 5.3.0` wait until
+  Gladys 5.3 is widespread.
 - **License**: Apache-2.0, the standard text (no person named), shipped in the
   image with `THIRD_PARTY_NOTICES.md` (full MIT notices of python-maxcube-api
   and Bouni/max-cube-protocol, both checked: MIT, not GPL).
