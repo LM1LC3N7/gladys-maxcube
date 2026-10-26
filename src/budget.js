@@ -7,7 +7,7 @@
 const WINDOW_MS = 60_000;
 
 export class Budget {
-  /** @param {{ perMinute: number, now?: () => number }} options */
+  /** @param {{ perMinute: number, now?: () => number }} options `now`: a monotonic clock */
   constructor({ perMinute, now = Date.now }) {
     this.perMinute = perMinute;
     this.now = now;

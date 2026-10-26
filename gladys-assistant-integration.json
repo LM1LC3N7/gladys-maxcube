@@ -46,10 +46,10 @@
     {
       "key": "options_section",
       "type": "section",
-      "label": { "en": "Commands (off by default)", "fr": "Commandes (désactivées par défaut)" },
+      "label": { "en": "Commands", "fr": "Commandes" },
       "description": {
-        "en": "By default Gladys only reads. Once an option is ticked, the dashboard, the scenes, the voice assistants (Siri / HomeKit, Alexa, Google Home) and the Thermostat service of Gladys can act. Each command asks the Cube for its live values just before acting. A setpoint goes to the whole room of the thermostat, as the MAX! software does. The weekly programme, the boost and the vacation mode stay in the MAX! software.",
-        "fr": "Par défaut Gladys ne fait que lire. Une fois une option cochée, le tableau de bord, les scènes, les assistants vocaux (Siri / HomeKit, Alexa, Google Home) et le service Thermostat de Gladys peuvent agir. Chaque commande demande au Cube ses valeurs courantes juste avant d’agir. Une consigne s’applique à toute la pièce du thermostat, comme le fait le logiciel MAX!. Le programme hebdomadaire, le boost et le mode vacances restent dans le logiciel MAX!."
+        "en": "By default Gladys only reads, and stops: the off mode (the valve closed) needs no option. Once an option is ticked, the dashboard, the scenes, the voice assistants (Siri / HomeKit, Alexa, Google Home) and the Thermostat service of Gladys can also set the setpoint or switch to heating or auto. Each of these commands asks the Cube for its live values just before acting. A command goes to the whole room of the thermostat, as the MAX! software does. The weekly programme, the boost and the vacation mode stay in the MAX! software.",
+        "fr": "Par défaut Gladys ne fait que lire, et arrêter : le mode arrêt (vanne fermée) ne demande aucune option. Une fois une option cochée, le tableau de bord, les scènes, les assistants vocaux (Siri / HomeKit, Alexa, Google Home) et le service Thermostat de Gladys peuvent aussi régler la consigne ou passer en chauffage ou en auto. Chacune de ces commandes demande au Cube ses valeurs courantes juste avant d’agir. Une commande s’applique à toute la pièce du thermostat, comme le fait le logiciel MAX!. Le programme hebdomadaire, le boost et le mode vacances restent dans le logiciel MAX!."
       }
     },
     {
@@ -59,8 +59,8 @@
       "default": false,
       "label": { "en": "Allow the setpoint commands", "fr": "Autoriser les commandes de consigne" },
       "description": {
-        "en": "The setpoint of a radiator or wall thermostat: 5 to 30 °C by half degrees, within the bounds set on the device. A value outside is refused, never brought back into the bounds.",
-        "fr": "La consigne d’un thermostat de radiateur ou mural : de 5 à 30 °C par demi-degré, dans les bornes réglées sur l’appareil. Une valeur en dehors est refusée, jamais ramenée dans les bornes."
+        "en": "The setpoint of a radiator or wall thermostat: 5 to 30 °C by half degrees, within the bounds set on every thermostat of the room. A value outside is refused, never brought back into the bounds. On a thermostat that is off, a setpoint also needs the mode commands.",
+        "fr": "La consigne d’un thermostat de radiateur ou mural : de 5 à 30 °C par demi-degré, dans les bornes réglées sur chaque thermostat de la pièce. Une valeur en dehors est refusée, jamais ramenée dans les bornes. Sur un thermostat à l’arrêt, une consigne demande aussi les commandes de mode."
       }
     },
     {
@@ -68,10 +68,13 @@
       "type": "boolean",
       "required": false,
       "default": false,
-      "label": { "en": "Allow the mode commands", "fr": "Autoriser les commandes de mode" },
+      "label": {
+        "en": "Allow the mode commands (auto, heating)",
+        "fr": "Autoriser les commandes de mode (auto, chauffage)"
+      },
       "description": {
-        "en": "The mode of a thermostat: auto (the weekly programme of the device), heating (a fixed setpoint), off (the valve closed: the setpoint 4.5 °C of MAX!). The thermostat applies its own frost protection as described by eQ-3: check the manual of your device before leaving a radiator off in winter.",
-        "fr": "Le mode d’un thermostat : auto (le programme hebdomadaire de l’appareil), chauffage (une consigne fixe), arrêt (la vanne fermée : la consigne 4,5 °C de MAX!). Le thermostat applique sa propre protection hors-gel telle que décrite par eQ-3 : vérifiez la notice de votre appareil avant de laisser un radiateur à l’arrêt en hiver."
+        "en": "Auto (the weekly programme of the device) and heating (a fixed setpoint). Off (the valve closed: the setpoint 4.5 °C of MAX!) needs no option: it is accepted with this option unticked. The thermostat applies its own frost protection as described by eQ-3: check the manual of your device before leaving a radiator off in winter.",
+        "fr": "Auto (le programme hebdomadaire de l’appareil) et chauffage (une consigne fixe). L’arrêt (la vanne fermée : la consigne 4,5 °C de MAX!) ne demande aucune option : il est accepté avec cette option décochée. Le thermostat applique sa propre protection hors-gel telle que décrite par eQ-3 : vérifiez la notice de votre appareil avant de laisser un radiateur à l’arrêt en hiver."
       }
     },
     {

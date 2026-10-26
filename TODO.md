@@ -24,17 +24,23 @@ up to date at the end of every milestone.
       fake Gladys and a fake Cube, a real local TCP server for the
       connection, a real-clock test of the loop. **Never tested with a real
       Cube.**
+- [x] **Review r1 fixes** (2026-10-26): off protective (no option, identity
+      only, ahead of reads and unwritten commands, checked and sent again);
+      commands confirmed on the follow-up reads; valid values only; radio
+      budget; monotonic budgets; per-device isolation of C and L; the
+      configuration read again without end; docs with exact refusal lists.
 - [ ] **Milestone 2 — real Cube** (a tester with a Cube and a few
       thermostats): record a real greeting as a fixture (serials replaced),
       fix what differs. To check first:
   - the room temperature of a radiator thermostat: bytes 9-10 of the L entry
     read as 9 bits (the low bit of byte 9, then byte 10), only in auto and
-    manual modes, 0 = not measured; python-maxcube-api reads byte 9 whole.
-    The documentation example holds a vacation date there in auto mode: to
-    be seen on a real Cube;
-  - the `valid` / `initialized` flags of the L entries: read but not used to
-    hold values back (python-maxcube-api ignores them); if a Cube lists zeros
-    for a device never heard, a target of 0 is already skipped;
+    manual modes, 0 = not measured, and only when the 7 other bits of byte 9
+    are 0 (else a date); python-maxcube-api reads byte 9 whole;
+  - the `valid` / `initialized` flags of the L entries: values held back
+    when either is off (python-maxcube-api ignores them): check that a real
+    Cube sets both on its working devices;
+  - whether a pushed `L:` lists every device or only the one that reported
+    (handled as partial: only the devices it lists change);
   - whether the Cube pushes `L:` on its own on a kept connection (it does in
     python-maxcube-api's "unsolicited messages"), and how soon the L reflects
     a command (the thermostat applies it when it listens, up to a few
@@ -81,10 +87,12 @@ up to date at the end of every milestone.
   opening never starts while one is in progress; the old connection is
   closed with `q:` before a new one.
 - **Interval**: 1 min (`l:` is the cache of the Cube, no radio; Home
-  Assistant reads every 5 min but relies on pushes too). Never sooner: the
-  loop, the test button, Discovery, a reconnection to Gladys, a restart
-  (`lastAttemptAt` in `/data`, written before the read). The test button
-  waits for the interval but not for the retry pause (1 to 10 min).
+  Assistant reads every 5 min but relies on pushes too). The loop never
+  reads sooner: the test button, Discovery, a reconnection to Gladys, a
+  restart (`lastAttemptAt` in `/data`, written before the read). Apart: a
+  command reads just before acting, and its follow-up reads (5 s, 30 s,
+  1 min, 2 min after its write). The test button waits for the interval but
+  not for the retry pause (1 to 10 min).
 - **External ids**: the serial numbers of the devices (`SERIAL`,
   10 letters / digits) and of the Cube: stable across addresses, rooms and
   names. A device without a usable serial, or a duplicate, is dropped (logged
@@ -100,41 +108,79 @@ up to date at the end of every milestone.
   the core lists none for `unknown`); battery `battery-low` / `binary`; link
   error `unknown` / `binary`; window `opening-sensor` / `binary` (1 closed,
   0 open, as the core's OPENING_SENSOR_STATE).
-- **Values**: a target of 0 (device never heard) is skipped; a radiator
-  temperature only in auto / manual and when 0 < t < 60 °C; a device absent
-  from the last L has no state and an unreachable badge.
-- **Commands off by default**: `allow_setpoint` and `allow_mode`, checked
-  when the command arrives AND just before sending; a permission taken away
-  applies at once (`restrict`). Decided on the L asked just before (or the
-  greeting of a new connection), never on memory. Nothing sent past 3.5 s;
-  the write must happen before the deadline (`beforeSend`); once written,
-  Gladys is answered at 4.3 s at most: "accepted" (S result 0), "sent,
-  without confirmation" (no S yet, a timeout, a close after the write),
-  "discarded" (S result 1), "not sent" (never written). The Cube is read
-  again 5 s after a command that left.
+- **Values**: shown only from an entry valid and initialized without a
+  radio link error (else only the battery and link flags, an unreachable
+  badge and a note); a target only within 4.5-30.5 (0 = never heard); a
+  radiator temperature only in auto / manual, when the 7 high bits of its
+  first byte are 0 and 0 < t < 60 °C. A pushed L changes only the devices it
+  lists; the answer to `l:` replaces all. Two devices on one RF address are
+  both left out (counted in the log). A C that does not decode or names
+  another address is skipped (that device has no configuration); an L entry
+  shorter than 6 bytes is skipped; only framing errors (line too long, bad
+  base64, an entry past the end, a greeting without H or a complete M, a
+  Cube serial not of 10 letters / digits) cut the connection.
+- **Off (protective)**: manual 4.5 °C (the MAX! off) to the room. Decision of
+  the r1 review: closing the valve is the safe side for a heating, so off
+  needs no option (`allow_mode` covers auto and heating only), no bounds and
+  no values, only the device in the metadata of the connection (which
+  cannot change while we hold the one client slot; a new connection reads
+  it again). Always sent (idempotent, never "already off"). At its arrival:
+  the queued commands of its room are cancelled, the running one too if not
+  written yet; a read in flight (loop or command) or an exchange stalled for
+  2.5 s cuts the connection (the cut read is not a failure: read again 5 s
+  later) and the stop opens a new one; it goes ahead of every exchange still
+  waiting (priority queue of the connection) and only waits for the answer
+  to an exchange already written (2 s at most). An opening in progress is
+  waited for (the Cube accepts one client), within the 3.5 s budget.
+  Checked on the follow-up reads: not applied 1 min after a write, sent
+  again, 3 times at most (not with a fresh duty cycle of 90 % or more);
+  still not applied 2 min after the last write: warn log and a status note
+  naming the device, until it shows it or another command replaces it.
+- **Setpoint, auto, heating**: `allow_setpoint` and `allow_mode`, off by
+  default, checked when the command arrives AND just before the write; a
+  permission taken away applies at once (`restrict`). Decided on the L
+  asked just before (or the greeting of a new connection), valid values
+  only, never on memory. Refused besides: a setpoint on a thermostat that is
+  off without `allow_mode` (it would start it); bounds of the room that
+  leave nothing; a fresh duty cycle of 90 % or more, or no free slot.
+  "Already" only when every thermostat of the room shows it. Not applied
+  2 min after the write: a warn log, not sent again.
+- **Budgets on the monotonic clock**: arrival, deadline (3.5 s), `beforeSend`
+  and the answer to Gladys (4.3 s); answers: "accepted" (S result 0 with
+  budget left), "queued" (S result 0 at 100 % or no free slot), "discarded"
+  (S result 1), "sent, without confirmation" (no S yet, a timeout, a close
+  after the write), "not sent" (never written).
+- **Radio budget**: the duty cycle and free slots of H and of every S, with
+  their instant; fresh 10 min (the Cube resets it hourly): not published,
+  not noted and not used to refuse once older.
 - **Setpoint**: 5-30 °C (the MAX! range; 4.5 = off, 30.5 = on, never
-  commanded) narrowed to the C message min / max of the device, rounded to
-  0.5 (the resolution); the raw value and the rounded one both checked,
-  never clamped; rf flag 04 with the room id (the whole room follows, as the
-  MAX! software), 00 without a room. In auto: auto with the temperature
-  (until the next switch point); otherwise manual.
-- **Mode**: AUTO = temperature 0 mode auto; HEATING = manual at the current
-  target, else the comfort temperature of the C message (refused if unknown
-  or out of bounds); OFF = manual 4.5 °C (the MAX! off), protective: goes
-  first in the queue and drops a stalled connection (an exchange without
-  answer for 2.5 s), subject to `allow_mode` like the other modes (decision:
-  the modes are off by default per the lot 16 brief; off is never blocked
-  by the queue or a dead connection). Boost and vacation are not commands
-  (vacation needs an until date; boost ends by itself).
+  commanded as setpoints) narrowed to the C min / max of every thermostat of
+  the room, rounded to 0.5 (the resolution); the raw value and the rounded
+  one both checked, never clamped; rf flag 04 with the room id (the whole
+  room follows, as the MAX! software), 00 without a room. In auto: auto with
+  the temperature (until the next switch point); otherwise manual.
+- **Heating / auto**: AUTO = temperature 0 mode auto; HEATING = manual at the
+  current target, else the comfort temperature of the C message (refused if
+  unknown or out of bounds). Boost and vacation are not commands (vacation
+  needs an until date; boost ends by itself).
+- **keep_connection off**: the connection is counted in uses (loop reads,
+  commands, writes in flight) and closed with `q:` at 0 uses only.
+- **Configuration**: asked again without end when Gladys cannot give it
+  (30 s doubled up to 10 min, the status says so), one chain at a time,
+  cancelled at a disconnection or a new connection; a command before it is
+  loaded: "not loaded yet".
 - **Bounds**: a line 16 KiB, a greeting 200 lines / 256 KiB, 20 M blocks,
   100 devices and rooms, 200 L entries, names 40 characters without control
   characters; every index checked (`Reader.need`); linear parsing, chunks
   joined once per line.
-- **Clock**: `monotonic` for every delay (`earliestAt(mono)` / `dueAt(mono)`
+- **Clock**: `monotonic` for every delay, the command budgets, the state
+  budget and the duty cycle freshness (`earliestAt(mono)` / `dueAt(mono)`
   with the instant handed on), `now` for `/data` only; the test clock moves
-  1 µs per read; a real-clock test (×20) measures the period.
-- **Status and logs**: our own words and error kinds, never a text of the
-  Cube (no serials, names or values in the logs).
+  1 µs per read; a real-clock test (×20) measures the period; the stop tests
+  run on a real clock and a real TCP Cube.
+- **Status and logs**: our own words, error kinds, device kinds and numbers
+  in the logs, never a text of the Cube (no serials, names or values); the
+  status names the devices (room and name) whose stop was not applied.
 - **Gladys 5.1.0 minimum**: `categories`, the thermostat mode / operating
   state types and `text` features are older than that; no `keywords` /
   `countries` yet (they would need 5.3.0, released on 2026-10-25).

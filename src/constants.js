@@ -99,6 +99,18 @@ export const COMMAND_MIN_READ_MS = 1_200;
 export const COMMAND_ACK_MS = 4_300;
 /** After a command was sent, the Cube is read again this soon to show the result. */
 export const READ_AFTER_COMMAND_MS = 5_000;
+/**
+ * The reads that follow a command, after its write: the thermostat applies
+ * it when it next listens to the Cube (usually within the minute). Each one
+ * compares the device with what was sent.
+ */
+export const FOLLOW_UPS_MS = Object.freeze([READ_AFTER_COMMAND_MS, 30_000, 60_000, 120_000]);
+/** A stop not seen applied this long after its write is sent again... */
+export const STOP_RESEND_AFTER_MS = 60_000;
+/** ...this many times at most (after the first send). */
+export const STOP_RESENDS = 3;
+/** A command not seen applied this long after its (last) write: said in the logs and the status. */
+export const VERIFY_GIVE_UP_MS = 120_000;
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -124,3 +136,10 @@ export const STATES_PER_MINUTE = 250;
 
 /** The radio duty cycle (%) from which the status warns: a command may be queued or dropped. */
 export const DUTY_CYCLE_WARNING = 80;
+/**
+ * From this duty cycle (%), or with no free slot, a command other than a
+ * stop is refused: the Cube would keep it for up to an hour.
+ */
+export const DUTY_CYCLE_REFUSE = 90;
+/** A duty cycle (from H or S) is fresh this long: the Cube resets it every hour. */
+export const DUTY_FRESH_MS = 10 * 60_000;

@@ -31,4 +31,20 @@ the notes of the version's GitHub Release.
   retries 1 to 10 min; bounded lines, greeting and metadata.
 - Button "Test the connection".
 
+### Changed
+
+- Off (the valve closed) needs no option and is never blocked by the bounds
+  or the values of the device: it cuts a read in progress, cancels the
+  commands of its room not sent yet, and is checked on the reads that follow
+  (sent again up to 3 times, then said in the status).
+- Commands are checked on the reads 5 s, 30 s, 1 min and 2 min after them;
+  only valid values are shown and used; a radio link error hides the cached
+  values; a radio budget of 90 % or more refuses the commands other than
+  off, and a command queued by the Cube is said so; the command budgets use
+  the monotonic clock; a setpoint no longer starts a thermostat that is off
+  without "Allow the mode commands"; the bounds and "already set" cover every
+  thermostat of the room.
+- One unreadable message of a device no longer stops the whole Cube; a
+  configuration Gladys cannot give is asked again without end.
+
 [Unreleased]: https://github.com/LM1LC3N7/gladys-maxcube/commits/main

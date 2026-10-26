@@ -6,7 +6,10 @@
 // of the Cube: only our own words and error kinds.
 // -----------------------------------------------------------------------------
 
+import { STOP_RESENDS } from './constants.js';
 import { ERROR_KINDS } from './cube/client.js';
+
+const STOP_SENDS = STOP_RESENDS + 1;
 
 const seconds = (ms) => Math.max(1, Math.round(ms / 1000));
 const minutes = (ms) => Math.max(1, Math.round(ms / 60_000));
@@ -86,6 +89,10 @@ export const T = {
         },
         RETRY(ms),
       ),
+    configNotRead: (ms) => ({
+      en: `Gladys could not give the configuration of the integration: new try in ${delay(ms)}.`,
+      fr: `Gladys n’a pas pu donner la configuration de l’intégration : nouvel essai dans ${delay(ms)}.`,
+    }),
     notCube: (ms) =>
       join(
         {
@@ -104,13 +111,21 @@ export const T = {
       en: `${n} ${plural(n, 'device gives', 'devices give')} no values yet (not heard by the Cube).`,
       fr: `${n} ${plural(n, 'appareil ne donne', 'appareils ne donnent')} pas encore de valeurs (pas entendus par le Cube).`,
     }),
+    invalid: (n) => ({
+      en: `${n} ${plural(n, 'device gives', 'devices give')} values the Cube marks as not valid: they are not shown.`,
+      fr: `${n} ${plural(n, 'appareil donne', 'appareils donnent')} des valeurs que le Cube marque comme non valables : elles ne sont pas affichées.`,
+    }),
+    stopNotApplied: (names) => ({
+      en: `The stop was not applied by: ${names.join(', ')} (sent ${STOP_SENDS} times). Check the device (batteries, radio range).`,
+      fr: `L’arrêt n’a pas été appliqué par : ${names.join(', ')} (envoyé ${STOP_SENDS} fois). Vérifiez l’appareil (piles, portée radio).`,
+    }),
     batteryLow: (n) => ({
       en: `${n} ${plural(n, 'device reports', 'devices report')} a low battery.`,
       fr: `${n} ${plural(n, 'appareil signale', 'appareils signalent')} une pile faible.`,
     }),
     linkError: (n) => ({
-      en: `${n} ${plural(n, 'device reports', 'devices report')} a radio link error.`,
-      fr: `${n} ${plural(n, 'appareil signale', 'appareils signalent')} une erreur de liaison radio.`,
+      en: `${n} ${plural(n, 'device reports', 'devices report')} a radio link error: its values are not shown.`,
+      fr: `${n} ${plural(n, 'appareil signale', 'appareils signalent')} une erreur de liaison radio : ses valeurs ne sont pas affichées.`,
     }),
   },
   test: {
@@ -157,6 +172,18 @@ export const T = {
     modeDisabled:
       'The mode commands are off: tick "Allow the mode commands" in the configuration of the integration',
     notConfigured: 'The address of the Cube is not set',
+    notLoaded: 'The configuration of the integration is not loaded yet: try again in a moment',
+    cancelledByStop: 'Cancelled: a stop was asked for this room meanwhile. Command not sent',
+    stopNotSent: (err) =>
+      `Stop not sent: the Cube could not be reached within the time Gladys waits (${reasonOf(err).en})`,
+    notUsable:
+      'The Cube marks the values of this device as not valid, or reports a radio link error: command not sent',
+    offNeedsMode:
+      'This thermostat is off: a setpoint would start it again. Switch it to heating or auto (needs "Allow the mode commands"). Command not sent',
+    radioLow: (percent) =>
+      `The radio budget of the Cube is almost used up (${percent ?? '?'} %, or no free slot): the command would wait up to an hour. Command not sent`,
+    queued:
+      'Accepted but queued by the Cube: its radio budget for the hour is used up, the command leaves when it has some again',
     configChanged: 'The configuration changed meanwhile: command not sent',
     tooSlow: 'The Cube is too slow to answer: command not sent',
     unknownState: (err) =>

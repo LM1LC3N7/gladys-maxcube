@@ -262,7 +262,7 @@ test('a connection object: the fake socket contract (write, destroy, on)', () =>
   };
   const connection = new CubeConnection(socket);
   const greeting = connection.waitGreeting(1000);
-  listeners.data(Buffer.from(`${DOC_H}\r\n${encodeL([])}\r\n`));
+  listeners.data(Buffer.from(`${DOC_H}\r\n${encodeM()[0]}\r\n${encodeL([])}\r\n`));
   return greeting.then((g) => {
     assert.equal(g.hello.serial, 'KEQ0523864');
     assert.deepEqual(g.list, []);

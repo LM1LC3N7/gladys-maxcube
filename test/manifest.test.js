@@ -157,7 +157,11 @@ test('the configuration matches the code; every command off by default; no secre
     fields.allow_setpoint.description.en,
     new RegExp(`${SETPOINT.MIN} to ${SETPOINT.MAX} °C`),
   );
-  assert.match(fields.allow_mode.description.en, /off \(the valve closed/);
+  assert.match(fields.allow_mode.description.en, /Off \(the valve closed[^)]*\) needs no option/);
+  assert.match(
+    fields.allow_mode.description.fr,
+    /L’arrêt \(la vanne fermée[^)]*\) ne demande aucune option/,
+  );
   assert.match(fields.options_section.description.en, /one client at a time|whole room/);
 });
 

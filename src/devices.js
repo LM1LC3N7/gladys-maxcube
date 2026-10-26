@@ -36,7 +36,7 @@ import {
   THERMOSTAT_FEATURES as TF,
   WINDOW_FEATURES as WF,
 } from './constants.js';
-import { MODES, MODE_NAMES, OFF_TEMPERATURE } from './cube/protocol.js';
+import { MODES, MODE_NAMES, OFF_TEMPERATURE, usable } from './cube/protocol.js';
 import { texts } from './i18n.js';
 
 export const idsOf = (gladys, kind, id) => gladys.externalIds(kind, id);
@@ -290,32 +290,33 @@ function collector() {
   return { states, add };
 }
 
-/** The states of every device of the model: the Cube, then each device the last list gave. */
-export function modelStates(gladys, model) {
+/**
+ * The states of every device of the model: the Cube (its duty cycle while
+ * fresh: `duty`), then each device the last list gave. Values only from a
+ * valid, initialized entry without a radio link error; the battery and the
+ * link flags always.
+ */
+export function modelStates(gladys, model, { duty } = {}) {
   const { states, add } = collector();
   const cube = idsOf(gladys, KINDS.CUBE, model.cube.serial);
-  add(cube.feature(CF.DUTY_CYCLE), model.cube.dutyCycle);
-  add(cube.feature(CF.FREE_SLOTS), model.cube.freeSlots);
+  add(cube.feature(CF.DUTY_CYCLE), duty?.dutyCycle);
+  add(cube.feature(CF.FREE_SLOTS), duty?.freeSlots);
   for (const item of model.devices) {
     const state = item.state;
     if (!state) continue;
     const ids = idsOf(gladys, item.kind, item.serial);
+    const flags = item.kind === KINDS.WINDOW ? WF : TF;
+    add(ids.feature(flags.BATTERY_LOW), bit(state.batteryLow));
+    add(ids.feature(flags.LINK_ERROR), bit(state.linkError));
+    if (!usable(state)) continue;
     if (item.kind === KINDS.WINDOW) {
       add(ids.feature(WF.CONTACT), state.open ? OPENING.OPEN : OPENING.CLOSE);
-      add(ids.feature(WF.BATTERY_LOW), bit(state.batteryLow));
-      add(ids.feature(WF.LINK_ERROR), bit(state.linkError));
       continue;
     }
     add(ids.feature(TF.TEMPERATURE), state.temperature);
-    // A target of 0 is "not reported yet" (a device never heard), never a setpoint.
-    add(
-      ids.feature(TF.TARGET),
-      isNumber(state.target) && state.target > 0 ? state.target : undefined,
-    );
+    add(ids.feature(TF.TARGET), state.target);
     add(ids.feature(TF.MODE), gladysModeOf(state));
     add(ids.feature(TF.MAX_MODE), MODE_NAMES[state.mode]);
-    add(ids.feature(TF.BATTERY_LOW), bit(state.batteryLow));
-    add(ids.feature(TF.LINK_ERROR), bit(state.linkError));
     if (item.kind === KINDS.THERMOSTAT) {
       add(ids.feature(TF.VALVE), state.valve);
       add(

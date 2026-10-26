@@ -34,18 +34,27 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (MaxCubeApp)
   `thermostat:<serial>`, `wall:<serial>`, `window:<serial>`.
 - **Bounds**: a line of 16 KiB at most, a greeting of 200 lines / 256 KiB,
   100 devices and rooms, 20 metadata blocks; every index into a decoded
-  message is checked; nothing the Cube sends is logged.
-- **Commands** (`allow_setpoint`, `allow_mode`, both off by default): the
-  setpoint (5-30 °C by half degrees within the bounds of the device, to the
-  room as the MAX! software does), the mode (auto: the programme; heating:
-  manual; off: manual 4.5 °C). The Cube is asked for its live values just
-  before acting and the decision is taken on that read only; nothing is sent
-  past 3.5 s; Gladys is answered at most 4.3 s after the command; the Cube is
-  read again 5 s later. An off command goes first and drops a connection
-  that no longer answers.
-- **Clock**: one read of the monotonic clock per decision (`dueAt(mono)`),
-  never sooner than the interval (a restart included: the time of the last
-  attempt is kept in `/data`); retries 1 to 10 min; heartbeat 10 min; at
+  message is checked; a configuration or a list entry of one device that
+  cannot be read leaves that device without values, the others are read;
+  the logs hold none of what the Cube sends (only our words, device kinds
+  and numbers). Values are shown only from valid, initialized entries
+  without a radio link error.
+- **Commands**, all to the room as the MAX! software does. **Off** (manual
+  4.5 °C, the valve closed) is protective: no option, identity only, always
+  sent; it cuts a read in flight (a new connection), cancels the commands of
+  its room not written yet, waits only for the answer to a command already
+  written, and is checked on the follow-up reads (sent again up to 3 times).
+  The setpoint (`allow_setpoint`: 5-30 °C by half degrees within the bounds
+  of every thermostat of the room) and auto / heating (`allow_mode`) are off
+  by default; they are decided on the live values asked just before, refused
+  on values not valid, on a radio budget of 90 % or more, and (a setpoint)
+  on a thermostat that is off without `allow_mode`. Budgets on the monotonic
+  clock: nothing written past 3.5 s after the arrival, Gladys answered at
+  most 4.3 s after it; follow-up reads 5 s, 30 s, 1 min and 2 min later.
+- **Clock**: one read of the monotonic clock per decision (`dueAt(mono)`);
+  the loop never reads sooner than the interval (a restart included: the
+  time of the last attempt is kept in `/data`), the reads that follow a
+  command apart; retries 1 to 10 min; heartbeat 10 min; at
   most 250 states a minute.
 - **Reconnection to Gladys**: status, Discovery, states and badges are
   published again; the connection to the Cube stays. A device republished

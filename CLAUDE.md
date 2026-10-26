@@ -54,19 +54,27 @@ test/fixtures/cube.js  the messages of the protocol documentation and our encode
 - **External ids are forever**: `<kind>:<serial number>`. The same goes for
   every key users store: manifest `config_schema`, `actions`, feature keys.
 - **The container rootfs is read-only.** Write only under `/data`. Never log
-  what the Cube sends (serials, names, values): only our own words and kinds.
+  what the Cube sends (serials, names, values): only our own words, device
+  kinds and numbers.
 - **Only `l:`, `s:` (command 40) and `q:` are ever written to the Cube.**
   Never the reset (`a:`), the pairing (`n:`, `x:`), the deletion (`t:`), the
   metadata write (`m:`), the time and NTP commands.
 - **One connection** to the Cube at a time (it accepts one client): never a
   second `openConnection` while one is in progress or open.
-- **Commands** stay behind `allow_setpoint` / `allow_mode` (off by default),
-  checked at arrival and just before sending, decided on the live values
-  asked just before. The setpoint is 5-30 °C by half degrees within the
-  device bounds, never clamped; off is manual 4.5 °C; cooling never.
-- **Never sooner than the interval**: the loop, the test button, Discovery, a
-  reconnection to Gladys and a restart (`/data`). One read of the monotonic
-  clock per decision, the instant handed on (`dueAt(mono)`).
+- **Off is protective** (manual 4.5 °C): never behind an option, bounds,
+  values, a read in flight or a command not yet written; it waits only for
+  the answer to a command already written. Never make it depend on more.
+- **Setpoint, auto and heating** stay behind `allow_setpoint` / `allow_mode`
+  (off by default), checked at arrival and just before sending, decided on
+  valid live values asked just before. The setpoint is 5-30 °C by half
+  degrees within the bounds of every thermostat of the room, never clamped;
+  cooling never.
+- **Budgets on the monotonic clock** (commands, state budget, duty cycle
+  freshness); the wall clock dates `/data` only.
+- **The loop never reads sooner than the interval**: the test button,
+  Discovery, a reconnection to Gladys and a restart (`/data`); the follow-up
+  reads of a command apart. One read of the monotonic clock per decision,
+  the instant handed on (`dueAt(mono)`).
 - **Versions belong to the Release workflow** (Actions → Release). Never edit
   `version` in `package.json` or in the manifest, nor the `docker_image` tag,
   by hand. `test/manifest.test.js` checks they agree.

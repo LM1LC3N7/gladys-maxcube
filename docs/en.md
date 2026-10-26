@@ -62,70 +62,112 @@ it does not wait for the retry pause after a failure.
   each one at least every 10 minutes).
 - The **temperature** of a radiator thermostat is only given by the Cube now
   and then (when the valve moves, in auto or manual mode); the one of a wall
-  thermostat always is. A device the Cube has not heard yet (no values) shows
+  thermostat is at each read (per the protocol description). A device the Cube has not heard yet (no values) shows
   as **unreachable** and the status says so.
 - The **mode** follows the modes of Gladys: **auto** (3) when the thermostat
   follows its weekly programme, **heating** (1) in manual, boost or vacation,
   **off** (0) when the setpoint is 4.5 °C (valve closed). The **MAX! mode**
   (text: `auto`, `manual`, `vacation`, `boost`) gives the detail.
 - The window contact is **1 closed, 0 open** (the opening sensor of Gladys).
+- Only the values the Cube marks **valid** are shown: a device whose entry is
+  not valid or not initialized, or that reports a **radio link error**, only
+  shows its flags (battery low, link error), shows as unreachable, and the
+  status says so. The radio budget of the Cube is only shown when less than
+  10 minutes old (the Cube resets it every hour).
+- A message of the Cube that cannot be read for one device (its
+  configuration, an entry too short) does not stop the reading of the
+  others. Two devices on the same radio address are left out (the log gives
+  their number).
 - The names of the rooms and devices are read again at each new connection
   (every 6 hours at the latest with the connection kept).
 
 ## Commands
 
-By default, Gladys only **reads**. Once an option is ticked, the dashboard,
-the scenes, the voice assistants (Siri / HomeKit, Alexa, Google Home) and the
-Thermostat service of Gladys can act.
+By default, Gladys only **reads**, and can **stop** a thermostat (the stop
+needs no option). Once an option is ticked, the dashboard, the scenes, the
+voice assistants (Siri / HomeKit, Alexa, Google Home) and the Thermostat
+service of Gladys can also set the setpoint or switch to heating or auto. As
+the MAX! software does, each command is sent to the **whole room** of the
+thermostat (the thermostats of a room are linked).
+
+### Off (mode 0)
+
+Off puts the thermostat in manual at **4.5 °C**, the "off" setpoint of MAX!
+(valve closed). It needs **no option**, no bounds and no values of the
+device: only the device in the list of the Cube. It is always sent (no effect
+when already off). It goes **before** the other commands: a read in progress
+is cut (the connection is closed and a new one opened); the commands of the
+same room asked before it and not sent yet are cancelled ("cancelled: a stop
+was asked"); it only waits for the answer to a command already sent (2 s at
+most). The thermostat applies its own frost protection as described by eQ-3:
+check the manual of your device before leaving a radiator off in winter.
+
+Off is **not sent** when: the address of the Cube is not set or the
+configuration is not loaded yet; the configuration changes during the
+command; the Cube cannot be reached (or another connection in progress does
+not open) within the 3.5 s that follow the command; the device is no longer
+paired with the Cube. Once sent, it can be **discarded by the Cube** (radio
+budget of the hour used up, or no free slot) or **queued** by it; Gladys says
+so.
+
+It is then **checked**: the Cube is read again 5 s, 30 s, 1 min and 2 min
+after it. When the thermostat does not show it 1 min after the send, it is
+sent again, 3 times at most (not while the fresh radio budget of the Cube is at
+90 % or more); when it is still not applied 2 min after the last send, the logs
+and the status of the integration say so ("the stop was not applied by ..."),
+until the device shows it or another command replaces it.
+
+### Setpoint, heating, auto
 
 - **Allow the setpoint commands**: the **setpoint** of a radiator or wall
   thermostat, **5 to 30 °C**, rounded to the half degree (the resolution of
-  the thermostat), within the bounds set on the device (the Cube gives them);
-  a value outside is refused, never brought back into the bounds. In auto
-  mode, the setpoint holds until the next switch point of the weekly
-  programme; otherwise it puts the thermostat in manual (a boost or a
-  vacation under way ends). As the MAX! software does, the setpoint is sent
-  to the **whole room** of the thermostat (the thermostats of a room are
-  linked together).
-- **Allow the mode commands**:
+  the thermostat), within the bounds set on **every thermostat of the room**
+  (the Cube gives them); a value outside is refused, never brought back into
+  the bounds. In auto mode, the setpoint holds until the next switch point of
+  the weekly programme; otherwise it puts the thermostat in manual (a boost or
+  a vacation under way ends).
+- **Allow the mode commands (auto, heating)**:
   - **auto** (3): back to the weekly programme of the device;
   - **heating** (1): manual at the current setpoint, or at the comfort
-    temperature set on the device when the valve was closed (refused when the
-    Cube does not give it);
-  - **off** (0): manual at 4.5 °C, the "off" setpoint of MAX! (valve closed).
-    The thermostat applies its own frost protection as described by eQ-3:
-    check the manual of your device before leaving a radiator off in winter;
+    temperature set on the device when the valve was closed;
   - **cooling** (2): refused, a MAX! thermostat does not cool.
 - Just before acting, Gladys **asks the Cube for its live values** and
-  decides on that read only. A command is **not sent** when: the option is
-  unticked (checked when the command arrives and again just before sending);
-  the value is not a number from 5 to 30 °C, or the mode is not 0, 1 or 3;
-  the device is no longer paired with the Cube; the Cube has no values for it
-  yet (not heard over the radio); the bounds of the device leave no valid
-  value; the read fails (no answer within 2.7 s, connection closed); the
-  configuration changed meanwhile; or the value asked is already the one the
-  Cube holds (nothing to do, the command is acknowledged).
-- When the command cannot be checked within 3.5 s, nothing is sent and Gladys
-  shows a failure. Once sent, Gladys answers at most 4.3 s after your command:
-  "accepted by the Cube" when the Cube answered that it passes it over the
-  radio, "sent, without confirmation" when it has not answered yet,
-  "discarded" when it discarded it (the radio budget of the hour is used up,
-  or no free slot: the status of the integration shows it). The Cube does not
-  confirm that the thermostat applied the command: the thermostat applies it
-  when it listens to the Cube (usually within the minute). The Cube is read
-  again 5 s after each command sent, then every minute; the value shown is
-  always the one the Cube gives, never the one asked.
-- The commands run one after the other (one Cube, one connection). An **off**
-  command goes before the other commands waiting; when the connection to the
-  Cube no longer answers (an exchange without answer for 2.5 s), it drops it
-  and opens a new one. It remains subject to the **Allow the mode commands**
-  option and to the refusals listed above.
-- The radio budget of the Cube (1 % of the time per hour, in Europe) limits
-  the number of commands per hour; the status of the integration warns from
-  80 %.
-- The weekly programme, the boost, the vacation mode, the comfort and eco
-  temperatures, the temperature offset and the pairing stay in the MAX!
-  software.
+  decides on that read only. One of these commands is **not sent** when:
+  - the option is unticked (checked when the command arrives and again just
+    before sending), or the configuration is not loaded yet;
+  - the value is not a number from 5 to 30 °C, or the mode is not 1 or 3;
+  - the thermostat is off and only the setpoint is allowed (a setpoint would
+    start it again: "switch it to heating or auto");
+  - the device is no longer paired; the Cube has no values for it; its
+    values are marked not valid or it reports a radio link error;
+  - the bounds of the thermostats of the room leave no value; heating needs
+    the comfort temperature and the Cube does not give it;
+  - the radio budget of the Cube (given less than 10 min ago) reaches 90 %
+    or it has no free slot (the command would wait up to an hour);
+  - the read fails or does not end in time, the configuration changes, or a
+    stop of the same room is asked meanwhile;
+  - the value asked is already the one of **every** thermostat of the room
+    (nothing to do, the command is acknowledged).
+- These commands run one after the other (one Cube, one connection).
+- A command not seen on the device 2 min after its send is said in the logs
+  (not sent again).
+
+### Delays
+
+The delays are measured on the monotonic clock of the container (a change of
+the time of day does not change them). When a command cannot be sent within
+the 3.5 s that follow its arrival, nothing is sent and Gladys shows a
+failure. Once sent, Gladys gets an answer at most 4.3 s after the command
+arrived: "accepted by the Cube" when the Cube answered that it passes it over
+the radio, "sent, without confirmation" when it has not answered yet,
+"queued" or "discarded" after its answer. The Cube does not confirm that the
+thermostat applied the command: it is checked on the follow-up reads (see
+above); the value shown is always the one the Cube gives, never the one
+asked.
+
+The weekly programme, the boost, the vacation mode, the comfort and eco
+temperatures, the temperature offset and the pairing stay in the MAX!
+software.
 
 ## Connection problems
 
@@ -135,11 +177,14 @@ Thermostat service of Gladys can act.
   MAX! software, another integration) holds the connection of the Cube.
 - **This address does not answer like a MAX! Cube**: the address or the port
   (62910) is wrong, or another service answers.
-- After a restart of the integration, the Cube is never read again less than
-  a minute after the previous read (the time of the last read is kept in
-  `/data`).
+- After a restart of the integration, the reading loop does not read the
+  Cube again less than a minute after the previous read (the time of the last
+  read is kept in `/data`); a command reads it just before acting, and the
+  reads that follow a command take place 5 s, 30 s, 1 min and 2 min after it.
 - The logs hold nothing of what the Cube sends (no serial numbers, names or
-  values), only our own words (no connection, no answer in time...).
+  values): only our own words, the kind of device ("thermostat", "wall") and
+  numbers (no connection, no answer in time...). The status of the
+  integration names the devices (room and name) whose stop was not applied.
 
 ## Limits
 

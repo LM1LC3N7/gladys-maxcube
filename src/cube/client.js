@@ -98,14 +98,17 @@ export class CubeConnection {
     this.metadataParts = [];
     this.metadata = undefined;
     this.configs = new Map();
+    this.badConfigs = 0;
     this.list = undefined;
     this.greeting = undefined;
     this.greetingLines = 0;
     this.greetingBytes = 0;
     /** The exchange waiting for its answer: { type, resolve, reject, timer }. */
     this.waiter = undefined;
-    /** Exchanges run one after the other. */
-    this.lane = Promise.resolve();
+    /** Exchanges waiting their turn, the priority ones (a stop) first. */
+    this.queue = [];
+    /** Why we closed: `preempted` (a stop needed the line), for the errors of what was cut. */
+    this.closeReason = undefined;
     /** When the exchange in flight was written (monotonic), or undefined. */
     this.busySince = undefined;
     socket.on('data', (data) => this.onData(data));
@@ -188,8 +191,16 @@ export class CubeConnection {
         return;
       }
       case 'C': {
-        const config = parseC(message.arg);
         if (this.configs.size >= LIMITS.DEVICES * 2) throw new ProtocolError('too many C');
+        let config;
+        try {
+          config = parseC(message.arg);
+        } catch {
+          // One configuration that does not decode (or names another
+          // address): that device has none, the Cube is read all the same.
+          this.badConfigs += 1;
+          return;
+        }
         this.configs.set(config.rfAddress, config);
         return;
       }
@@ -199,6 +210,9 @@ export class CubeConnection {
         if (this.waiter?.type === 'L') {
           this.settle(entries);
         } else if (this.greeting) {
+          // A greeting without its whole metadata is not a Cube (or not yet
+          // one): never an empty installation.
+          if (!this.hello || !this.metadata) throw new ProtocolError('greeting without metadata');
           const greeting = this.greeting;
           this.greeting = undefined;
           this.timers.clearTimeout(greeting.timer);
@@ -242,6 +256,7 @@ export class CubeConnection {
   }
 
   fail(err) {
+    this.mark(err);
     const { waiter, greeting } = this;
     this.waiter = undefined;
     this.greeting = undefined;
@@ -257,9 +272,14 @@ export class CubeConnection {
     this.close();
   }
 
-  /** Closes the connection; `quit`: tells the Cube first (`q:`), so it frees the slot at once. */
-  close({ quit = false } = {}) {
+  /**
+   * Closes the connection; `quit`: tells the Cube first (`q:`), so it frees
+   * the slot at once; `preempted`: a stop needs the line, the errors of what
+   * is cut say so.
+   */
+  close({ quit = false, preempted = false } = {}) {
     if (this.closed) return;
+    if (preempted) this.closeReason = 'preempted';
     this.closed = true;
     this.chunks = [];
     this.size = 0;
@@ -272,6 +292,20 @@ export class CubeConnection {
     if (this.waiter || this.greeting) {
       this.fail(new CubeError(ERROR_KINDS.CLOSED, 'connection closed'));
     }
+    // What waited its turn was never written.
+    const queued = this.queue;
+    this.queue = [];
+    for (const job of queued) {
+      job.reject(
+        this.mark(new CubeError(ERROR_KINDS.CLOSED, 'connection closed', { notSent: true })),
+      );
+    }
+  }
+
+  /** An error of this connection, marked when we cut it for a stop. */
+  mark(err) {
+    if (this.closeReason === 'preempted') err.preempted = true;
+    return err;
   }
 
   // --- The greeting and the exchanges ------------------------------------------------
@@ -299,21 +333,47 @@ export class CubeConnection {
   /**
    * One exchange: `text` written, the answer of `type` awaited within
    * `timeoutMs`. `beforeSend()` runs right before the write: what it throws
-   * is rethrown marked `notSent`. Exchanges run one after the other.
+   * is rethrown marked `notSent`. Exchanges run one after the other; a
+   * `priority` one (a stop) goes before every exchange still waiting, never
+   * before the one in flight.
    */
-  exchange(type, text, timeoutMs, { beforeSend } = {}) {
-    const run = this.lane.then(() => this.exchangeNow(type, text, timeoutMs, { beforeSend }));
-    this.lane = run.then(
-      () => {},
-      () => {},
-    );
-    return run;
+  exchange(type, text, timeoutMs, { beforeSend, priority = false } = {}) {
+    return new Promise((resolve, reject) => {
+      const job = { type, text, timeoutMs, beforeSend, priority, resolve, reject };
+      if (priority) {
+        const at = this.queue.findIndex((queued) => !queued.priority);
+        this.queue.splice(at === -1 ? this.queue.length : at, 0, job);
+      } else {
+        this.queue.push(job);
+      }
+      this.next();
+    });
   }
 
-  exchangeNow(type, text, timeoutMs, { beforeSend }) {
+  /** The type of the exchange in flight ('L', 'S'), or undefined. */
+  get inFlight() {
+    return this.waiter?.type;
+  }
+
+  next() {
+    if (this.waiter || this.queue.length === 0) return;
+    const job = this.queue.shift();
+    this.exchangeNow(job).then(
+      (value) => {
+        job.resolve(value);
+        this.next();
+      },
+      (err) => {
+        job.reject(err);
+        this.next();
+      },
+    );
+  }
+
+  exchangeNow({ type, text, timeoutMs, beforeSend }) {
     if (this.closed) {
       return Promise.reject(
-        new CubeError(ERROR_KINDS.CLOSED, 'connection closed', { notSent: true }),
+        this.mark(new CubeError(ERROR_KINDS.CLOSED, 'connection closed', { notSent: true })),
       );
     }
     if (beforeSend) {
@@ -323,7 +383,8 @@ export class CubeConnection {
         return Promise.reject(Object.assign(err, { notSent: true }));
       }
     }
-    if (timeoutMs < 1) {
+    const timeout = typeof timeoutMs === 'function' ? timeoutMs() : timeoutMs;
+    if (!(timeout >= 1)) {
       return Promise.reject(new CubeError(ERROR_KINDS.LATE, 'too late', { notSent: true }));
     }
     return new Promise((resolve, reject) => {
@@ -332,7 +393,7 @@ export class CubeConnection {
         if (this.waiter === waiter) {
           this.fail(new CubeError(ERROR_KINDS.TIMEOUT, 'no answer in time', { sent: true }));
         }
-      }, timeoutMs);
+      }, timeout);
       this.waiter = waiter;
       this.busySince = this.monotonic();
       try {
@@ -349,8 +410,8 @@ export class CubeConnection {
   }
 
   /** `s:<base64>` -> { dutyCycle, result, freeSlots }; REJECTED (sent) when the Cube discarded it. */
-  async send(base64, timeoutMs = TIMEOUTS.SEND, { beforeSend } = {}) {
-    const answer = await this.exchange('S', `s:${base64}`, timeoutMs, { beforeSend });
+  async send(base64, timeoutMs = TIMEOUTS.SEND, { beforeSend, priority = false } = {}) {
+    const answer = await this.exchange('S', `s:${base64}`, timeoutMs, { beforeSend, priority });
     if (answer.result !== 0) {
       throw new CubeError(ERROR_KINDS.REJECTED, 'command discarded', { sent: true, answer });
     }

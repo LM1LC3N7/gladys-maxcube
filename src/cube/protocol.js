@@ -97,7 +97,8 @@ export function parseH(arg) {
   const fields = String(arg).split(',');
   if (fields.length < 7) throw new ProtocolError('short H message');
   const serial = fields[0];
-  if (!/^[A-Za-z0-9]{1,16}$/.test(serial)) throw new ProtocolError('bad serial in H');
+  // The same shape as the serials of the devices (SERIAL): the Cube becomes a device too.
+  if (!/^[A-Za-z0-9]{10}$/.test(serial)) throw new ProtocolError('bad serial in H');
   const rfAddress = hex(fields[1], 6);
   if (rfAddress === undefined) throw new ProtocolError('bad RF address in H');
   return {
@@ -247,10 +248,14 @@ export function parseL(arg) {
   let pos = 0;
   while (pos < data.length) {
     const length = data[pos];
-    if (length < 6 || pos + 1 + length > data.length) throw new ProtocolError('bad L entry');
+    // Only a framing error stops the whole list: an entry past the end.
+    if (pos + 1 + length > data.length) throw new ProtocolError('bad L entry');
     const entry = data.subarray(pos + 1, pos + 1 + length);
     pos += 1 + length;
     if (entries.length >= LIMITS.LIST_ENTRIES) throw new ProtocolError('too many L entries');
+    // An entry too short for any device (an unknown one, a firmware of its
+    // own) is skipped: that device has no values, the others are read.
+    if (length < 6) continue;
     const item = {
       rfAddress: rfAddressOf(entry.subarray(0, 3)),
       length,
@@ -261,8 +266,10 @@ export function parseL(arg) {
       item.target = (entry[7] & 0x7f) / 2;
       // The room temperature of a radiator thermostat, in auto and manual
       // modes only (the bytes hold the end of a vacation otherwise); 0 is
-      // "not measured". Nine bits: the low bit of byte 8 and byte 9.
-      item.temperature = ((entry[8] & 0x01) * 256 + entry[9]) / 10;
+      // "not measured". Nine bits: the low bit of byte 8 and byte 9; the
+      // seven other bits of byte 8 set mean a date, never a temperature.
+      item.temperature =
+        (entry[8] & 0xfe) === 0 ? ((entry[8] & 0x01) * 256 + entry[9]) / 10 : undefined;
     }
     if (length >= 12) {
       // A wall thermostat: nine bits, the top bit of byte 7 and byte 11.
@@ -275,6 +282,8 @@ export function parseL(arg) {
 }
 
 const plausible = (t) => t > 0 && t < 60;
+/** A setpoint as the Cube reports it: 4.5 (off) to 30.5 (on); 0 is "not heard yet". */
+const setpointOf = (t) => (t >= OFF_TEMPERATURE && t <= ON_TEMPERATURE ? t : undefined);
 
 /**
  * The state of a device of a known type from its L entry:
@@ -294,7 +303,7 @@ export function deviceState(entry, type) {
     return {
       ...base,
       mode,
-      target: entry.target,
+      target: setpointOf(entry.target),
       valve: entry.valve <= 100 ? entry.valve : undefined,
       temperature: measured && plausible(entry.temperature) ? entry.temperature : undefined,
     };
@@ -304,7 +313,7 @@ export function deviceState(entry, type) {
     return {
       ...base,
       mode: entry.flags.mode,
-      target: entry.target,
+      target: setpointOf(entry.target),
       temperature: plausible(entry.wallTemperature) ? entry.wallTemperature : undefined,
     };
   }
@@ -363,3 +372,7 @@ export function buildTemperatureCommand({ rfAddress, roomId, temperature, mode }
   ]);
   return bytes.toString('base64');
 }
+
+/** Whether a device state can be shown and decided on: valid, initialized, no radio link error. */
+export const usable = (state) =>
+  Boolean(state && state.valid && state.initialized && !state.linkError);

@@ -66,7 +66,7 @@ après une panne.
   changent sont envoyées à Gladys (et chacune au moins toutes les 10 minutes).
 - La **température** d'un thermostat de radiateur n'est donnée par le Cube
   que par moments (quand la vanne bouge, en mode auto ou manuel) ; celle d'un
-  thermostat mural l'est toujours. Un appareil que le Cube n'a pas encore
+  thermostat mural l'est à chaque lecture (d'après la doc du protocole). Un appareil que le Cube n'a pas encore
   entendu (pas de valeurs) apparaît **injoignable** et l'état le dit.
 - Le **mode** suit les modes de Gladys : **auto** (3) quand le thermostat
   suit son programme hebdomadaire, **chauffage** (1) en manuel, en boost ou
@@ -75,63 +75,110 @@ après une panne.
   détail.
 - Le contact de fenêtre vaut **1 fermé, 0 ouvert** (capteur d'ouverture de
   Gladys).
+- Seules les valeurs que le Cube marque **valables** sont affichées : un
+  appareil dont l'entrée n'est pas valable ou pas initialisée, ou qui signale
+  une **erreur de liaison radio**, n'affiche que ses indicateurs (pile faible,
+  erreur de liaison), apparaît injoignable, et l'état le dit. Le budget radio
+  du Cube n'est affiché que s'il date de moins de 10 minutes (le Cube le
+  remet à zéro chaque heure).
+- Un message du Cube qui ne se lit pas pour un appareil (sa configuration,
+  une entrée trop courte) n'empêche pas de lire les autres. Deux appareils
+  sur la même adresse radio sont laissés de côté (le journal en donne le
+  nombre).
 - Les noms des pièces et des appareils sont relus à chaque nouvelle
   connexion (au plus tard toutes les 6 heures avec la connexion gardée).
 
 ## Commandes
 
-Par défaut, Gladys ne fait que **lire**. Une fois une option cochée, le
-tableau de bord, les scènes, les assistants vocaux (Siri / HomeKit, Alexa,
-Google Home) et le service Thermostat de Gladys peuvent agir.
+Par défaut, Gladys ne fait que **lire**, et peut **arrêter** un thermostat
+(l'arrêt ne demande aucune option). Une fois une option cochée, le tableau de
+bord, les scènes, les assistants vocaux (Siri / HomeKit, Alexa, Google Home)
+et le service Thermostat de Gladys peuvent aussi régler la consigne ou passer
+en chauffage ou en auto. Comme le logiciel MAX!, chaque commande est envoyée à
+**toute la pièce** du thermostat (les thermostats d'une pièce sont liés).
+
+### Arrêt (mode 0)
+
+L'arrêt met le thermostat en manuel à **4,5 °C**, la consigne « arrêt » de
+MAX! (vanne fermée). Il ne demande **aucune option**, ni bornes, ni valeurs de
+l'appareil : seulement l'appareil dans la liste du Cube. Il est toujours
+envoyé (sans effet s'il est déjà à l'arrêt). Il passe **avant** les autres
+commandes : une lecture en cours est coupée (la connexion est fermée et une
+nouvelle est ouverte) ; les commandes de la même pièce demandées avant lui et
+pas encore envoyées sont annulées (« annulée : un arrêt a été demandé ») ; il
+n'attend que la réponse d'une commande déjà envoyée (2 s au plus). Le
+thermostat applique sa propre protection hors-gel telle que décrite par eQ-3 :
+vérifiez la notice de votre appareil avant de laisser un radiateur à l'arrêt
+en hiver.
+
+L'arrêt **n'est pas envoyé** quand : l'adresse du Cube n'est pas saisie ou la
+configuration n'est pas encore chargée ; la configuration change pendant la
+commande ; le Cube ne peut pas être joint (ou une autre connexion en cours ne
+s'ouvre pas) dans les 3,5 s qui suivent la commande ; l'appareil n'est plus
+appairé au Cube. Une fois envoyé, il peut être **rejeté par le Cube** (budget
+radio de l'heure épuisé ou plus d'emplacement libre) ou **mis en attente** par
+lui ; Gladys le dit.
+
+Il est ensuite **vérifié** : le Cube est relu 5 s, 30 s, 1 min et 2 min après.
+Si le thermostat ne montre pas l'arrêt 1 min après l'envoi, il est renvoyé, 3
+fois au plus (pas quand le budget radio frais du Cube atteint 90 %) ; s'il ne
+l'a toujours pas appliqué 2 min après le dernier envoi, les journaux et l'état
+de l'intégration le disent (« l'arrêt n'a pas été appliqué par … »), jusqu'à
+ce que l'appareil le montre ou qu'une autre commande le remplace.
+
+### Consigne, chauffage, auto
 
 - **Autoriser les commandes de consigne** : la **consigne** d'un thermostat de
   radiateur ou mural, de **5 à 30 °C**, arrondie au demi-degré (la résolution
-  du thermostat), dans les bornes réglées sur l'appareil (le Cube les donne) ;
-  une valeur en dehors est refusée, jamais ramenée dans les bornes. En mode
-  auto, la consigne vaut jusqu'au prochain point du programme hebdomadaire ;
-  sinon elle passe le thermostat en manuel (un boost ou un mode vacances en
-  cours se termine). Comme le logiciel MAX!, la consigne est envoyée à **toute
-  la pièce** du thermostat (les thermostats d'une pièce sont liés entre eux).
-- **Autoriser les commandes de mode** :
+  du thermostat), dans les bornes réglées sur **chaque thermostat de la
+  pièce** (le Cube les donne) ; une valeur en dehors est refusée, jamais
+  ramenée dans les bornes. En mode auto, la consigne vaut jusqu'au prochain
+  point du programme hebdomadaire ; sinon elle passe le thermostat en manuel
+  (un boost ou un mode vacances en cours se termine).
+- **Autoriser les commandes de mode (auto, chauffage)** :
   - **auto** (3) : retour au programme hebdomadaire de l'appareil ;
   - **chauffage** (1) : manuel à la consigne actuelle, ou à la température
-    confort réglée sur l'appareil quand la vanne était fermée (refusé si le
-    Cube ne la donne pas) ;
-  - **arrêt** (0) : manuel à 4,5 °C, la consigne « arrêt » de MAX! (vanne
-    fermée). Le thermostat applique sa propre protection hors-gel telle que
-    décrite par eQ-3 : vérifiez la notice de votre appareil avant de laisser
-    un radiateur à l'arrêt en hiver ;
+    confort réglée sur l'appareil quand la vanne était fermée ;
   - **refroidissement** (2) : refusé, un thermostat MAX! ne refroidit pas.
 - Juste avant d'agir, Gladys **demande au Cube ses valeurs courantes** et
-  décide sur cette lecture seulement. Une commande n'est **pas envoyée**
-  quand : l'option est décochée (vérifiée à l'arrivée de la commande et de
-  nouveau juste avant l'envoi) ; la valeur n'est pas un nombre de 5 à 30 °C,
-  ou le mode n'est pas 0, 1 ou 3 ; l'appareil n'est plus appairé au Cube ;
-  le Cube n'a pas encore de valeurs pour lui (pas entendu par radio) ; les
-  bornes de l'appareil ne laissent aucune valeur valable ; la lecture échoue
-  (pas de réponse en 2,7 s, connexion fermée) ; la configuration a changé
-  entre-temps ; ou la valeur demandée est déjà celle du Cube (rien à faire,
-  commande acquittée).
-- Quand la commande ne peut pas être vérifiée en 3,5 s, rien n'est envoyé et
-  Gladys affiche un échec. Une fois envoyée, Gladys répond au plus 4,3 s après
-  votre commande : « acceptée par le Cube » quand le Cube a répondu qu'il la
-  transmet par radio, « envoyée, sans confirmation » s'il n'a pas encore
-  répondu, « rejetée » s'il l'a rejetée (budget radio de l'heure épuisé, ou
-  plus d'emplacement libre : l'état de l'intégration l'affiche). Le Cube ne
-  confirme pas que le thermostat a appliqué la commande : celui-ci l'applique
-  quand il écoute le Cube (en général dans la minute). Le Cube est relu 5 s
-  après chaque commande envoyée, puis toutes les minutes ; la valeur affichée
-  est toujours celle que le Cube donne, jamais celle demandée.
-- Les commandes passent une par une (un seul Cube, une seule connexion). Une
-  commande d'**arrêt** passe avant les autres commandes en attente ; si la
-  connexion au Cube ne répond plus (un échange sans réponse depuis 2,5 s),
-  elle la ferme et en ouvre une nouvelle. Elle reste soumise à l'option
-  **Autoriser les commandes de mode** et aux refus listés ci-dessus.
-- Le budget radio du Cube (1 % du temps par heure, en Europe) limite le nombre
-  de commandes par heure ; l'état de l'intégration prévient à partir de 80 %.
-- Le programme hebdomadaire, le boost, le mode vacances, les températures
-  confort et éco, le décalage de température et l'appairage restent dans le
-  logiciel MAX!.
+  décide sur cette lecture seulement. Une de ces commandes **n'est pas
+  envoyée** quand :
+  - l'option est décochée (vérifiée à l'arrivée et de nouveau juste avant
+    l'envoi), ou la configuration n'est pas encore chargée ;
+  - la valeur n'est pas un nombre de 5 à 30 °C, ou le mode n'est pas 1 ou 3 ;
+  - le thermostat est à l'arrêt et seule la consigne est autorisée (une
+    consigne le rallumerait : « repassez-le en chauffage ou en auto ») ;
+  - l'appareil n'est plus appairé ; le Cube n'a pas de valeurs pour lui ; ses
+    valeurs sont marquées non valables ou il signale une erreur de liaison ;
+  - les bornes des thermostats de la pièce ne laissent aucune valeur ; le
+    chauffage demande la température confort et le Cube ne la donne pas ;
+  - le budget radio du Cube (donné il y a moins de 10 min) atteint 90 % ou
+    il n'a plus d'emplacement libre (la commande attendrait jusqu'à une
+    heure) ;
+  - la lecture échoue ou ne finit pas à temps, la configuration change, ou
+    un arrêt de la même pièce est demandé entre-temps ;
+  - la valeur demandée est déjà celle de **tous** les thermostats de la
+    pièce (rien à faire, commande acquittée).
+- Ces commandes passent une par une (un seul Cube, une seule connexion).
+- Une commande qui n'est pas visible sur l'appareil 2 min après son envoi est
+  signalée dans les journaux (pas de renvoi).
+
+### Délais
+
+Les délais se mesurent sur l'horloge monotone du conteneur (un changement
+d'heure ne les change pas). Quand une commande ne peut pas être envoyée dans
+les 3,5 s qui suivent son arrivée, rien n'est envoyé et Gladys affiche un
+échec. Une fois envoyée, Gladys reçoit une réponse au plus 4,3 s après
+l'arrivée de la commande : « acceptée par le Cube » quand le Cube a répondu
+qu'il la transmet par radio, « envoyée, sans confirmation » s'il n'a pas
+encore répondu, « mise en attente » ou « rejetée » selon sa réponse. Le Cube
+ne confirme pas que le thermostat a appliqué la commande : elle est vérifiée
+sur les relectures (voir plus haut) ; la valeur affichée est toujours celle
+que le Cube donne, jamais celle demandée.
+
+Le programme hebdomadaire, le boost, le mode vacances, les températures
+confort et éco, le décalage de température et l'appairage restent dans le
+logiciel MAX!.
 
 ## Problèmes de connexion
 
@@ -142,12 +189,16 @@ Google Home) et le service Thermostat de Gladys peuvent agir.
   intégration) occupe la connexion du Cube.
 - **Cette adresse ne répond pas comme un MAX! Cube** : l'adresse ou le port
   (62910) est faux, ou un autre service répond.
-- Après un redémarrage de l'intégration, le Cube n'est jamais relu moins
-  d'une minute après la lecture précédente (l'heure de la dernière lecture
-  est gardée dans `/data`).
+- Après un redémarrage de l'intégration, la boucle de lecture ne relit pas le
+  Cube moins d'une minute après la lecture précédente (l'heure de la dernière
+  lecture est gardée dans `/data`) ; une commande, elle, le lit juste avant
+  d'agir, et les relectures qui suivent une commande ont lieu 5 s, 30 s, 1 min
+  et 2 min après elle.
 - Les journaux ne contiennent rien de ce que le Cube envoie (ni numéros de
-  série, ni noms, ni valeurs), seulement des mots à nous (pas de connexion,
-  pas de réponse à temps…).
+  série, ni noms, ni valeurs) : seulement des mots à nous, le type d'appareil
+  (« thermostat », « wall ») et des nombres (pas de connexion, pas de réponse à
+  temps…). L'état de l'intégration, lui, nomme les appareils (pièce et nom)
+  dont l'arrêt n'a pas été appliqué.
 
 ## Limites
 

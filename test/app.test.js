@@ -338,9 +338,11 @@ test('commands are off by default: refused with the option to tick, nothing writ
   let ack = await command(gladys, 'thermostat', TRV.serial, 'target', 21);
   assert.equal(ack.success, false);
   assert.match(ack.error, /Allow the setpoint commands/);
-  ack = await command(gladys, 'wall', WALL.serial, 'mode', 0);
-  assert.equal(ack.success, false);
-  assert.match(ack.error, /Allow the mode commands/);
+  for (const mode of [1, 3]) {
+    ack = await command(gladys, 'wall', WALL.serial, 'mode', mode);
+    assert.equal(ack.success, false);
+    assert.match(ack.error, /Allow the mode commands/);
+  }
   assert.equal(cube.sent.length, 0);
   assert.equal(listsOf(cube), 0, 'nothing is read for a refused command');
 });
@@ -366,7 +368,7 @@ test('setpoint: a fresh l: first, then command 40 to the room, auto kept; read a
   await wait(READ_AFTER_COMMAND_MS);
   assert.equal(last(gladys, T('target')), 21.5);
   assert.equal(listsOf(cube), 2);
-  assert.deepEqual(delays().map(Math.round), [MINUTE], 'then the loop goes on');
+  assert.deepEqual(delays().map(Math.round), [25 * SECOND], 'the next follow-up read (30 s)');
   // The wall thermostat: the same command, its own address.
   await command(gladys, 'wall', WALL.serial, 'target', 18);
   assert.deepEqual(lastSent(cube).slice(6), [0x0f, 0xc3, 0x80, 1, 0x24]);
@@ -394,17 +396,13 @@ test('setpoint: out of bounds, not a number, or the device bounds: refused, neve
   assert.equal(listsOf(cube), 0, 'an invalid value is refused before any read');
 });
 
-test('setpoint: the bounds of the device narrow the range; bounds that leave nothing refuse', async () => {
-  // A Cube giving 8-25 °C for the wall thermostat, and bounds that leave nothing for the radiator one.
+test('setpoint: the bounds of every thermostat of the room narrow the range, never clamped', async () => {
+  // The wall thermostat allows 8-25 °C: the radiator one of the same room follows it.
   const cube = createFakeCube();
   const lines = cube.greet();
   lines[lines.findIndex((l) => l.startsWith(`C:${WALL.rf.toLowerCase()}`))] = encodeC(WALL, {
     min: 8,
     max: 25,
-  });
-  lines[lines.findIndex((l) => l.startsWith(`C:${TRV.rf.toLowerCase()}`))] = encodeC(TRV, {
-    min: 25,
-    max: 10,
   });
   cube.greeting = lines;
   const { gladys, start, createAll } = await setup({ cube, config: ALLOW });
@@ -418,18 +416,32 @@ test('setpoint: the bounds of the device narrow the range; bounds that leave not
   assert.match(ack.error, /from 8 to 25 °C/);
   ack = await command(gladys, 'wall', WALL.serial, 'target', 7.5);
   assert.match(ack.error, /from 8 to 25 °C/);
+  ack = await command(gladys, 'thermostat', TRV.serial, 'target', 27); // the room: the wall bounds
+  assert.match(ack.error, /from 8 to 25 °C/);
   ack = await command(gladys, 'wall', WALL.serial, 'target', 25);
   assert.equal(ack.success, true);
   assert.equal(cube.sent.length, 1);
-  ack = await command(gladys, 'thermostat', TRV.serial, 'target', 20);
+});
+
+test('bounds that leave nothing: setpoint refused, the stop still sent', async () => {
+  const cube = createFakeCube();
+  const lines = cube.greet();
+  lines[lines.findIndex((l) => l.startsWith(`C:${TRV.rf.toLowerCase()}`))] = encodeC(TRV, {
+    min: 25,
+    max: 10,
+  });
+  cube.greeting = lines;
+  const { gladys, start, createAll } = await setup({ cube, config: ALLOW });
+  await start();
+  await createAll();
+  let ack = await command(gladys, 'thermostat', TRV.serial, 'target', 20);
   assert.match(ack.error, /leave no valid value/);
+  ack = await command(gladys, 'wall', WALL.serial, 'target', 20);
+  assert.match(ack.error, /leave no valid value/, 'the same room');
+  assert.equal(cube.sent.length, 0);
   ack = await command(gladys, 'thermostat', TRV.serial, 'mode', 0);
-  assert.match(
-    ack.error,
-    /leave no valid value/,
-    'a stop needs bounds too: the Cube would get 4.5 anyway',
-  );
-  assert.equal(cube.sent.length, 1);
+  assert.deepEqual(ack, { success: true });
+  assert.equal(lastSent(cube)[10], 0x49);
 });
 
 test('mode: off (manual 4.5 °C), auto (back to the programme), heating (manual at the comfort temperature)', async () => {
@@ -481,15 +493,27 @@ test('already in the state asked: nothing sent, acknowledged', async () => {
   assert.deepEqual(ack, { success: true });
   assert.equal(cube.sent.length, 0);
   assert.equal(listsOf(cube), 2, 'still read before deciding');
-  cube.states = [[TRV, { mode: MODES.MANUAL, valve: 0, target: 4.5 }]];
-  ack = await command(gladys, 'thermostat', TRV.serial, 'mode', 0);
-  assert.deepEqual(ack, { success: true });
-  assert.equal(cube.sent.length, 0);
-  // Heating while manual at 21: already.
-  cube.states = [[TRV, { mode: MODES.MANUAL, valve: 20, target: 21 }]];
+  // Heating while the room is manual at 21: already.
+  cube.states = [
+    [TRV, { mode: MODES.MANUAL, valve: 20, target: 21 }],
+    [WALL, { mode: MODES.MANUAL, target: 21 }],
+  ];
   ack = await command(gladys, 'thermostat', TRV.serial, 'mode', 1);
   assert.deepEqual(ack, { success: true });
   assert.equal(cube.sent.length, 0);
+  // Another thermostat of the room elsewhere: not "already", sent.
+  cube.states = [
+    [TRV, { mode: MODES.MANUAL, valve: 20, target: 21 }],
+    [WALL, { mode: MODES.AUTO, target: 18 }],
+  ];
+  ack = await command(gladys, 'thermostat', TRV.serial, 'target', 21);
+  assert.deepEqual(ack, { success: true });
+  assert.equal(cube.sent.length, 1);
+  // A stop is always sent (idempotent), even when the device shows it off.
+  cube.states = [[TRV, { mode: MODES.MANUAL, valve: 0, target: 4.5 }]];
+  ack = await command(gladys, 'thermostat', TRV.serial, 'mode', 0);
+  assert.deepEqual(ack, { success: true });
+  assert.equal(cube.sent.length, 2);
 });
 
 test('decided on the fresh read: a device not heard, gone, or a read that fails: not sent', async () => {
@@ -559,9 +583,10 @@ test('no answer to s: in time: "sent, without confirmation" at 4.3 s; too slow: 
   const other = await setup({ cube: slow, config: ALLOW });
   await other.start();
   await other.createAll();
-  const original = other.app.now;
+  // The budget is on the monotonic clock: 2.5 s pass between arrival and read.
+  const original = other.app.monotonic;
   let calls = 0;
-  other.app.now = () => original() + (calls++ > 0 ? 2500 : 0);
+  other.app.monotonic = () => original() + (calls++ > 0 ? 2500 : 0);
   const ack3 = await command(other.gladys, 'thermostat', TRV.serial, 'target', 21);
   assert.match(ack3.error, /too slow/);
   assert.equal(listsOf(slow), 0);
@@ -590,10 +615,10 @@ test('a stop (mode off) goes first and drops a connection that no longer answers
   assert.deepEqual(ackStop, { success: true });
   assert.equal(cube.sent[0].length > 2, true);
   assert.equal([...Buffer.from(cube.sent[0].slice(2), 'base64')][10], 0x49, 'the stop first');
-  // The setpoint was reading on the dropped connection: refused, nothing sent for it.
+  // The setpoint of the same room, not written yet: cancelled by the stop.
   const ackSet = await setpoint;
   assert.equal(ackSet.success, false);
-  assert.match(ackSet.error, /could not be read just before acting/);
+  assert.match(ackSet.error, /Cancelled: a stop was asked/);
   assert.equal(cube.sent.length, 1);
   assert.equal(app.commands.length, 0);
 });

@@ -12,17 +12,19 @@
 //                  two reads is published at once), or on a connection opened
 //                  and closed for each read (`keep_connection` off, so the
 //                  MAX! software can connect in between). Unreachable: a
-//                  retry 1 to 10 min later. Never sooner than the interval,
-//                  a restart included (the time of the last attempt is kept
-//                  in /data).
+//                  retry 1 to 10 min later. The loop never reads sooner than
+//                  the interval, a restart included (the time of the last
+//                  attempt is kept in /data); the reads that follow a command
+//                  (5 s, 30 s, 1 min, 2 min after it) check what it did.
 //   setValue       the commands, see "Commands" below.
 //
 // One loop, one timer: halt() bumps an epoch, and a run of an older epoch
 // never schedules itself again. The created devices are read from
 // `gladys.devices`, which the SDK keeps up to date: never a copy of our own.
-// Two clocks: `now` (wall clock) dates /data; `monotonic` paces every delay.
-// Each decision reads the monotonic clock once and hands the instant on
-// (dueAt(mono)): a real clock moves between two reads of it.
+// Two clocks: `now` (wall clock) dates /data only; `monotonic` paces every
+// delay, the command budgets and the state budget. Each decision reads the
+// monotonic clock once and hands the instant on (dueAt(mono)): a real clock
+// moves between two reads of it.
 // -----------------------------------------------------------------------------
 
 import { createLogger } from '@gladysassistant/integration-sdk';
@@ -33,15 +35,20 @@ import {
   COMMAND_BUDGET_MS,
   COMMAND_MIN_READ_MS,
   COMMAND_MIN_SEND_MS,
+  DUTY_CYCLE_REFUSE,
   DUTY_CYCLE_WARNING,
+  DUTY_FRESH_MS,
+  FOLLOW_UPS_MS,
   INTERVALS,
   KINDS,
-  READ_AFTER_COMMAND_MS,
   SERIAL,
   SETPOINT,
   STATES_PER_MINUTE,
+  STOP_RESEND_AFTER_MS,
+  STOP_RESENDS,
   THERMOSTAT_FEATURES as TF,
   TIMEOUTS,
+  VERIFY_GIVE_UP_MS,
 } from './constants.js';
 import { ERROR_KINDS, openConnection, tcpConnect } from './cube/client.js';
 import {
@@ -52,6 +59,7 @@ import {
   isShutterContact,
   isThermostat,
   isWallThermostat,
+  usable,
 } from './cube/protocol.js';
 import {
   THERMOSTAT_MODE,
@@ -78,6 +86,18 @@ const kindOf = (type) => {
   if (isShutterContact(type)) return KINDS.WINDOW;
   return undefined;
 };
+
+/** An error for Gladys, with what the Cube said underneath (never shown). */
+const refusal = (message, cause) => (cause ? new Error(message, { cause }) : new Error(message));
+
+/** Whether a thermostat state shows what a command asked: { mode, target } (target for manual). */
+function applied(expect, state) {
+  if (!usable(state)) return false;
+  if (expect.mode === MODES.AUTO) {
+    return state.mode === MODES.AUTO && (expect.target === 0 || state.target === expect.target);
+  }
+  return state.mode === MODES.MANUAL && state.target === expect.target;
+}
 
 export class MaxCubeApp {
   /**
@@ -106,20 +126,27 @@ export class MaxCubeApp {
     this.monotonic = monotonic;
     this.timers = timers;
     this.store = store;
-    this.budget = new Budget({ perMinute: STATES_PER_MINUTE, now });
+    this.budget = new Budget({ perMinute: STATES_PER_MINUTE, now: monotonic });
     this.budgetCursor = 0;
+    /** Whether a configuration was given (start): commands wait for it. */
+    this.loaded = false;
     this.rawConfig = {};
     this.config = normalizeConfig();
     this.configKey = null;
     this.connection = null;
     this.opening = null;
+    /** What uses the connection now (reads, commands): with `keep_connection` off, closed at 0. */
+    this.uses = 0;
     this.generation = 0;
     this.epoch = 0;
     this.timer = undefined;
     this.queue = Promise.resolve();
-    /** The commands waiting: a stop (mode off) goes first. */
+    /** The commands other than a stop, waiting their turn; `active`: the one running. */
     this.commands = [];
+    this.active = undefined;
     this.pumping = false;
+    /** The stops, one after the other, never behind another command. */
+    this.stops = Promise.resolve();
     this.lastStatus = null;
     this.wantedStatus = null;
     this.gladysAway = false;
@@ -132,7 +159,10 @@ export class MaxCubeApp {
     this.online = false;
     this.retryDelay = INTERVALS.RETRY_MIN_MS;
     this.nextTryAt = undefined;
-    this.followUpAt = undefined;
+    /** The reads that follow commands (monotonic instants, sorted). */
+    this.followUps = [];
+    /** What the commands sent and the follow-up reads check: serial -> expectation. */
+    this.expectations = new Map();
     this.lastReadAt = undefined;
     this.notBefore = 0;
     this.connectedAt = 0;
@@ -217,16 +247,17 @@ export class MaxCubeApp {
     }
   }
 
-  dropConnection({ quit = false } = {}) {
+  dropConnection({ quit = false, preempted = false } = {}) {
     const connection = this.connection;
     this.connection = null;
-    connection?.close({ quit });
+    connection?.close({ quit, preempted });
   }
 
   async run(rawConfig) {
     const config = normalizeConfig(rawConfig);
     const key = JSON.stringify(config);
     this.gladysAway = false;
+    this.loaded = true;
     if (this.configKey === key && this.connection && !this.connection.closed) {
       await this.resume();
       return;
@@ -305,7 +336,7 @@ export class MaxCubeApp {
   dueAt(mono) {
     let due = this.earliestAt(mono);
     if (this.nextTryAt !== undefined) due = Math.max(due, this.nextTryAt);
-    if (this.followUpAt !== undefined) due = Math.min(due, this.followUpAt);
+    if (this.followUps.length) due = Math.min(due, this.followUps[0]);
     return Math.max(due, mono);
   }
 
@@ -331,6 +362,15 @@ export class MaxCubeApp {
     return generation === this.generation && epoch === this.epoch;
   }
 
+  /** Reads after a command written at `mono`: they check what it did. */
+  addFollowUps(mono) {
+    this.followUps = [...this.followUps, ...FOLLOW_UPS_MS.map((ms) => mono + ms)].sort(
+      (a, b) => a - b,
+    );
+    this.nextTryAt = undefined;
+    if (!this.gladysAway && this.config.cube) this.schedule(mono);
+  }
+
   /**
    * One round of the reading loop. Never throws. `now`: the test button,
    * which only waits for the interval, not for the retry pause.
@@ -340,47 +380,70 @@ export class MaxCubeApp {
     const mono = this.monotonic();
     if (mono < (now ? this.earliestAt(mono) : this.dueAt(mono))) return;
     this.lastReadAt = mono;
-    this.followUpAt = undefined;
+    this.followUps = this.followUps.filter((at) => at > mono);
     await this.saveAttempt(this.now());
     if (!this.current(generation, epoch)) return;
     try {
       await this.fetch(generation, mono);
     } catch (err) {
+      if (err?.preempted) {
+        // Cut by a stop that needed the line: read again soon, not a failure.
+        this.followUps = [mono + FOLLOW_UPS_MS[0], ...this.followUps].sort((a, b) => a - b);
+        return;
+      }
       if (this.current(generation, epoch)) await this.failed(err, mono);
       return;
     }
     if (!this.current(generation, epoch)) return;
-    await this.succeeded();
+    await this.succeeded(mono);
   }
 
-  /** The Cube read: a new connection and its greeting, or `l:` on the one kept. */
+  /** The Cube read: a new connection and its greeting, or `l:` on the one open. */
   async fetch(generation, mono) {
-    let connection = this.connection;
     if (
-      connection &&
-      !connection.closed &&
-      this.config.keepConnection &&
+      this.connection &&
+      !this.connection.closed &&
+      this.uses === 0 &&
       mono - this.connectedAt >= INTERVALS.RECONNECT_MS
     ) {
       // Fresh rooms, names and configurations now and then.
       this.dropConnection({ quit: true });
-      connection = null;
     }
-    if (!connection || connection.closed) {
-      const opened = await this.open(TIMEOUTS.CONNECT);
-      if (generation !== this.generation) return;
-      this.model = this.buildModel(opened.greeting);
-    } else {
+    this.uses += 1;
+    try {
+      const { connection, opened } = await this.acquire(TIMEOUTS.CONNECT);
+      if (generation !== this.generation || opened) return;
       const entries = await connection.requestList(TIMEOUTS.LIST);
       if (generation !== this.generation || connection !== this.connection) return;
       this.applyList(this.model, entries);
+      this.lastListAt = this.monotonic();
+    } finally {
+      this.release();
     }
-    if (!this.config.keepConnection) this.dropConnection({ quit: true });
+  }
+
+  /** The connection open, or a new one (its greeting gives a fresh model). -> { connection, opened } */
+  async acquire(timeoutMs) {
+    if (this.connection && !this.connection.closed) return { connection: this.connection };
+    const opened = await this.open(timeoutMs);
+    return { connection: opened.connection, opened: true };
+  }
+
+  /** One use of the connection less: with `keep_connection` off, closed once unused. */
+  release() {
+    this.uses = Math.max(0, this.uses - 1);
+    if (this.uses === 0 && !this.config.keepConnection) this.dropConnection({ quit: true });
+  }
+
+  /** `release()` once `promise` ends. */
+  releaseAfter(promise) {
+    promise.then(noop, noop).then(() => this.release());
   }
 
   /**
    * Opens the one connection (the Cube accepts a single client): a second
-   * caller waits for the opening in progress. -> { connection, greeting }.
+   * caller waits for the opening in progress. The greeting gives the model.
+   * -> { connection, greeting }.
    */
   open(timeoutMs) {
     if (this.opening) return this.opening;
@@ -404,19 +467,31 @@ export class MaxCubeApp {
         opened.connection.close({ quit: true });
         throw Object.assign(new Error('replaced'), { kind: ERROR_KINDS.CLOSED, notSent: true });
       }
+      let model;
+      try {
+        model = this.buildModel(opened.greeting);
+      } catch (err) {
+        opened.connection.close({ quit: true });
+        throw err;
+      }
+      if (opened.connection.badConfigs) {
+        this.logger.warn(`${opened.connection.badConfigs} device configuration(s) not readable`);
+      }
       opened.connection.onPush = (entries) => this.pushed(opened.connection, entries);
       this.connection = opened.connection;
       this.connectedAt = this.monotonic();
+      this.model = model;
       return opened;
     })();
     return this.opening;
   }
 
-  /** The Cube sent an L on its own (a device reported): published at once. */
+  /** The Cube sent an L on its own (a device reported): the devices it lists, published at once. */
   pushed(connection, entries) {
     if (connection !== this.connection || !this.model || !this.online || this.gladysAway) return;
-    this.applyList(this.model, entries);
+    this.applyList(this.model, entries, { partial: true });
     void this.publishStates();
+    void this.publishTransports();
   }
 
   /** The greeting -> the model: the Cube, its rooms and devices with their configuration and values. */
@@ -426,20 +501,22 @@ export class MaxCubeApp {
       throw Object.assign(new Error('no hello'), { kind: ERROR_KINDS.PROTOCOL, notSent: true });
     }
     const rooms = new Map(metadata.rooms.map((room) => [room.id, room.name]));
+    const known = metadata.devices.filter((item) => kindOf(item.type));
+    // Two devices on one radio address would share values and commands: neither is kept.
+    const rfCount = new Map();
+    for (const item of known) rfCount.set(item.rfAddress, (rfCount.get(item.rfAddress) ?? 0) + 1);
     const seen = new Set();
     const devices = [];
     let dropped = 0;
-    for (const item of metadata.devices) {
-      const kind = kindOf(item.type);
-      if (!kind) continue;
-      if (!SERIAL.test(item.serial) || seen.has(item.serial)) {
+    for (const item of known) {
+      if (!SERIAL.test(item.serial) || seen.has(item.serial) || rfCount.get(item.rfAddress) > 1) {
         dropped += 1;
         continue;
       }
       seen.add(item.serial);
       const config = configs.get(item.rfAddress);
       devices.push({
-        kind,
+        kind: kindOf(item.type),
         type: item.type,
         serial: item.serial,
         rfAddress: item.rfAddress,
@@ -450,13 +527,17 @@ export class MaxCubeApp {
         state: undefined,
       });
     }
-    if (dropped) this.logger.warn(`${dropped} device(s) without a usable serial number ignored`);
+    if (dropped) {
+      this.logger.warn(`${dropped} device(s) ignored (no usable serial number, or shared address)`);
+    }
+    const mono = this.monotonic();
     const model = {
       cube: {
         serial: hello.serial,
         firmware: hello.firmware,
         dutyCycle: hello.dutyCycle,
         freeSlots: hello.freeSlots,
+        dutyAt: mono,
       },
       rooms: rooms.size,
       devices,
@@ -465,21 +546,37 @@ export class MaxCubeApp {
     return model;
   }
 
-  /** The live values of an L message applied to the devices of the model. */
-  applyList(model, entries) {
+  /** The live values of an L message applied to the devices of the model (`partial`: a push). */
+  applyList(model, entries, { partial = false } = {}) {
     if (!model) return;
     const byRf = new Map(entries.map((entry) => [entry.rfAddress, entry]));
     for (const item of model.devices) {
       const entry = byRf.get(item.rfAddress);
-      item.state = entry ? deviceState(entry, item.type) : undefined;
+      if (entry) item.state = deviceState(entry, item.type);
+      else if (!partial) item.state = undefined;
     }
+  }
+
+  /** The duty cycle and free slots the Cube gave last, while fresh (10 min), else undefined. */
+  duty(mono = this.monotonic()) {
+    const cube = this.model?.cube;
+    if (!cube || cube.dutyAt === undefined || mono - cube.dutyAt > DUTY_FRESH_MS) return undefined;
+    return { dutyCycle: cube.dutyCycle, freeSlots: cube.freeSlots };
+  }
+
+  /** An S answer: the newest duty cycle and free slots. */
+  noteAnswer(answer) {
+    if (!this.model || !answer) return;
+    this.model.cube.dutyCycle = answer.dutyCycle;
+    this.model.cube.freeSlots = answer.freeSlots;
+    this.model.cube.dutyAt = this.monotonic();
   }
 
   /** A reading failed: a retry with a growing delay, never sooner than the interval. */
   async failed(err, mono) {
     const wasOnline = this.online;
     this.online = false;
-    this.dropConnection();
+    if (this.uses === 0) this.dropConnection();
     const delay = Math.max(this.retryDelay, INTERVALS.READ_MS);
     this.retryDelay = Math.min(this.retryDelay * 2, INTERVALS.RETRY_MAX_MS);
     this.nextTryAt = mono + delay;
@@ -496,16 +593,76 @@ export class MaxCubeApp {
     );
   }
 
-  async succeeded() {
+  async succeeded(mono) {
     this.online = true;
     this.retryDelay = INTERVALS.RETRY_MIN_MS;
     this.nextTryAt = undefined;
+    this.verify(mono);
     const devices = this.discoveredDevices();
     const key = JSON.stringify(devices);
     if (key !== this.discoveredKey) await this.publishDiscovered(devices);
     await this.publishStates();
     await this.publishTransports();
     await this.setStatus(true, this.okMessage());
+  }
+
+  /**
+   * The follow-up reads: each command checked against the device. A stop not
+   * applied is sent again (3 times at most); any command still not applied
+   * 2 min after its last write is said in the logs (and in the status for a
+   * stop, until the device shows it or another command replaces it).
+   */
+  verify(mono) {
+    for (const [serial, expect] of this.expectations) {
+      const item = this.model?.devices.find((d) => d.serial === serial && d.kind === expect.kind);
+      if (!item) {
+        this.expectations.delete(serial);
+        continue;
+      }
+      if (applied(expect, item.state)) {
+        if (expect.failed) this.logger.info(`A ${expect.action} was applied in the end`);
+        this.expectations.delete(serial);
+        continue;
+      }
+      const since = mono - expect.sentAt;
+      if (expect.action === 'stop' && expect.resends < STOP_RESENDS) {
+        if (since >= STOP_RESEND_AFTER_MS && !expect.resending)
+          void this.resendStop(serial, expect);
+        continue;
+      }
+      if (since >= VERIFY_GIVE_UP_MS && !expect.failed) {
+        expect.failed = true;
+        this.logger.warn(
+          `A ${expect.action} sent to a ${expect.kind} was not applied (${expect.resends + 1} send(s))`,
+        );
+        if (expect.action !== 'stop') this.expectations.delete(serial);
+      }
+    }
+  }
+
+  /** A stop not seen applied: sent again through the stop lane (never past a fresh radio budget). */
+  async resendStop(serial, expect) {
+    const duty = this.duty();
+    if (duty && (duty.dutyCycle >= DUTY_CYCLE_REFUSE || duty.freeSlots === 0)) return;
+    // Counted when tried: a resend that cannot leave is not tried for ever.
+    const attempt = expect.resends + 1;
+    expect.resends = attempt;
+    expect.resending = true;
+    try {
+      const job = this.newJob(
+        { kind: expect.kind, id: serial },
+        { action: 'stop', value: THERMOSTAT_MODE.OFF, protective: true },
+      );
+      this.logger.warn(`A stop was not applied by a ${expect.kind}: sent again (${attempt})`);
+      await this.runStop(job);
+    } catch (err) {
+      this.logger.warn(`Sending the stop again failed (${err?.cause?.kind ?? 'error'})`);
+    } finally {
+      expect.resending = false;
+    }
+    // The new write replaced the expectation: it keeps the count.
+    const next = this.expectations.get(serial);
+    if (next && next !== expect && next.action === 'stop') next.resends = attempt;
   }
 
   /**
@@ -532,15 +689,26 @@ export class MaxCubeApp {
   okMessage() {
     const model = this.model;
     const notes = [];
-    if (Number.isFinite(model.cube.dutyCycle) && model.cube.dutyCycle >= DUTY_CYCLE_WARNING) {
-      notes.push(T.notes.dutyCycle(model.cube.dutyCycle));
+    const duty = this.duty();
+    if (duty && Number.isFinite(duty.dutyCycle) && duty.dutyCycle >= DUTY_CYCLE_WARNING) {
+      notes.push(T.notes.dutyCycle(duty.dutyCycle));
     }
     const missing = model.devices.filter((d) => !d.state).length;
     if (missing) notes.push(T.notes.missing(missing));
-    const battery = model.devices.filter((d) => d.state?.batteryLow).length;
-    if (battery) notes.push(T.notes.batteryLow(battery));
+    const invalid = model.devices.filter(
+      (d) => d.state && !d.state.linkError && !usable(d.state),
+    ).length;
+    if (invalid) notes.push(T.notes.invalid(invalid));
     const link = model.devices.filter((d) => d.state?.linkError).length;
     if (link) notes.push(T.notes.linkError(link));
+    const battery = model.devices.filter((d) => d.state?.batteryLow).length;
+    if (battery) notes.push(T.notes.batteryLow(battery));
+    const failedStops = [...this.expectations.entries()]
+      .filter(([, e]) => e.action === 'stop' && e.failed)
+      .map(([serial]) => model.devices.find((d) => d.serial === serial))
+      .filter(Boolean)
+      .map((d) => (d.roomName ? `${d.roomName} - ${d.name}` : d.name));
+    if (failedStops.length) notes.push(T.notes.stopNotApplied(failedStops));
     const devices = this.discoveredDevices();
     const ids = new Set(devices.map((d) => d.external_id));
     const created = (this.gladys.devices ?? []).filter((d) => ids.has(d.external_id)).length;
@@ -572,7 +740,7 @@ export class MaxCubeApp {
   async publishStates() {
     const model = this.model;
     if (!model || this.gladysAway) return;
-    const states = modelStates(this.gladys, model);
+    const states = modelStates(this.gladys, model, { duty: this.duty() });
     // Only the features the created devices have (fixed at their creation).
     const features = new Set(
       (this.gladys.devices ?? []).flatMap((d) => (d.features ?? []).map((f) => f.external_id)),
@@ -599,7 +767,7 @@ export class MaxCubeApp {
     }
   }
 
-  /** The badge of every created device: local while the Cube answers and lists it. */
+  /** The badge of every created device: local while the Cube answers and gives valid values. */
   async publishTransports() {
     if (this.gladysAway) return;
     const model = this.online ? this.model : null;
@@ -608,7 +776,7 @@ export class MaxCubeApp {
         ? [
             idsOf(this.gladys, KINDS.CUBE, model.cube.serial).device,
             ...model.devices
-              .filter((d) => d.state)
+              .filter((d) => usable(d.state))
               .map((d) => idsOf(this.gladys, d.kind, d.serial).device),
           ]
         : [],
@@ -658,60 +826,63 @@ export class MaxCubeApp {
 
   // --- Commands ----------------------------------------------------------------------
   //
-  // The setpoint needs `allow_setpoint`, the mode `allow_mode`; both are off
-  // by default and checked when the command arrives AND just before it is
-  // sent. The value is checked strictly (null, '' and true are not numbers).
-  // The commands run one after the other (one Cube, one connection): a stop
-  // (mode off: the valve closed) goes before the others, and drops a
-  // connection that no longer answers so as to use a new one. Each command
-  // asks the Cube for its live values just before acting (`l:`, its cache)
-  // and decides on that read only, never on memory: a device gone, a device
-  // the Cube has not heard, a read that fails, and nothing is sent; the
-  // value already there, and nothing is sent either. Gladys waits 5 s: past
-  // 3.5 s after the command arrived, nothing is sent any more; once sent,
-  // Gladys gets its answer at most 4.3 s after the command, and a command
-  // that may have left is never told "not sent". The S answer of the Cube
-  // says it accepted the command for the radio; the thermostat applies it
-  // when it next listens: the next read shows the value the Cube holds.
+  // The stop (mode off: manual 4.5 °C, the valve closed) is protective: it
+  // needs no option, no bounds and no values of the device, only its identity
+  // (in the metadata of the connection), and it never waits behind a read or
+  // another command: a read in flight is cut (the connection dropped, a new
+  // one opened), a command not yet written is cancelled (the ones of the
+  // same room arrived before the stop, and the one whose read is cut); it
+  // only waits for the answer to a command already written (2 s at most).
+  // It is always sent (idempotent), and checked on the follow-up reads: not
+  // applied after 1 min, it is sent again, 3 times at most.
+  //
+  // Auto and heating need `allow_mode`, the setpoint `allow_setpoint`; both
+  // are off by default and checked when the command arrives AND just before
+  // it is sent. They run one after the other, each on the live values asked
+  // to the Cube just before (`l:`, or the greeting of a new connection), on
+  // valid values only, never on memory. Gladys waits 5 s: past 3.5 s after
+  // the command arrived (monotonic clock), nothing is sent any more; once
+  // sent, Gladys gets its answer at most 4.3 s after the command arrived.
+
+  /** A command for Gladys (or a resent stop): its arrival on the monotonic clock. */
+  newJob(parsed, command) {
+    const job = { received: this.monotonic(), generation: this.generation, parsed, command };
+    job.written = false;
+    job.cancelled = false;
+    return job;
+  }
 
   setValue(device, feature, value) {
-    const received = this.now();
     const parsed = parseExternalId(this.gladys, feature?.external_id);
     if (!parsed?.feature) throw new Error(T.errors.unknownDevice);
     const command = this.validate(parsed, value);
+    if (!this.loaded) throw new Error(T.errors.notLoaded);
     this.checkPermission(command);
     if (!this.config.cube) throw new Error(T.errors.notConfigured);
-    const generation = this.generation;
-    const job = { received, generation, parsed, command };
-    job.promise = new Promise((resolve, reject) => {
+    const job = this.newJob(parsed, command);
+    if (command.protective) return this.queueStop(job);
+    return new Promise((resolve, reject) => {
       job.resolve = resolve;
       job.reject = reject;
-    });
-    if (command.protective) {
-      this.commands.unshift(job);
-      // A connection that no longer answers is not waited for by a stop.
-      if (this.connection?.stalled(TIMEOUTS.STALL, this.monotonic())) {
-        this.logger.warn('The Cube does not answer: the connection is dropped for the stop');
-        this.dropConnection();
-      }
-    } else {
       this.commands.push(job);
-    }
-    void this.pump();
-    return job.promise;
+      void this.pump();
+    });
   }
 
-  /** The commands, one after the other. */
+  /** The commands other than a stop, one after the other. */
   async pump() {
     if (this.pumping) return;
     this.pumping = true;
     try {
       while (this.commands.length > 0) {
         const job = this.commands.shift();
+        this.active = job;
         try {
           job.resolve(await this.command(job));
         } catch (err) {
-          job.reject(err);
+          job.reject(job.cancelled ? new Error(T.errors.cancelledByStop) : err);
+        } finally {
+          this.active = undefined;
         }
       }
     } finally {
@@ -749,18 +920,17 @@ export class MaxCubeApp {
       case TF.MODE: {
         const mode = typeof value === 'string' && /^[0-3]$/.test(value) ? Number(value) : value;
         if (mode === THERMOSTAT_MODE.COOLING) throw new Error(T.errors.coolingMode);
-        if (
-          mode !== THERMOSTAT_MODE.OFF &&
-          mode !== THERMOSTAT_MODE.HEATING &&
-          mode !== THERMOSTAT_MODE.AUTO
-        ) {
+        if (mode === THERMOSTAT_MODE.OFF) {
+          // Protective: no option, never blocked by one.
+          return { action: 'stop', value: mode, protective: true };
+        }
+        if (mode !== THERMOSTAT_MODE.HEATING && mode !== THERMOSTAT_MODE.AUTO) {
           throw new Error(T.errors.invalidMode);
         }
         return {
-          action: 'mode',
+          action: mode === THERMOSTAT_MODE.AUTO ? 'auto' : 'heating',
           value: mode,
           permission: 'mode',
-          protective: mode === THERMOSTAT_MODE.OFF,
         };
       }
       default:
@@ -769,64 +939,182 @@ export class MaxCubeApp {
   }
 
   /** The configuration and the permission are still those of the command. */
-  stillValid({ generation, command }) {
+  stillValid({ generation, command, cancelled }) {
+    if (cancelled) throw new Error(T.errors.cancelledByStop);
     if (generation !== this.generation || !this.config.cube) {
       throw new Error(T.errors.configChanged);
     }
     this.checkPermission(command);
   }
 
-  async command(job) {
-    const { received, parsed, command } = job;
-    this.stillValid(job);
-    const deadline = received + COMMAND_BUDGET_MS;
-    if (deadline - this.now() < COMMAND_MIN_READ_MS) throw new Error(T.errors.tooSlow);
-    // The fresh read: the greeting of a new connection, or `l:` on the one kept.
-    let connection;
-    try {
-      const left = deadline - COMMAND_MIN_SEND_MS - this.now();
-      if (this.connection && !this.connection.closed) {
-        connection = this.connection;
-        const entries = await connection.requestList(Math.min(TIMEOUTS.LIST, left));
-        if (connection !== this.connection) throw new Error(T.errors.configChanged);
-        this.applyList(this.model, entries);
-      } else {
-        const opened = await this.open(Math.min(TIMEOUTS.CONNECT, left));
-        connection = opened.connection;
-        this.stillValid(job);
-        this.model = this.buildModel(opened.greeting);
-      }
-    } catch (err) {
-      if (err?.message === T.errors.configChanged) throw err;
-      throw new Error(T.errors.unknownState(err), { cause: err });
-    }
-    if (this.online) void this.publishStates();
-    const plan = this.plan(parsed, command);
-    if (plan.already) {
-      this.release();
-      return;
-    }
-    if (deadline - this.now() < COMMAND_MIN_SEND_MS) {
-      this.release();
-      throw new Error(T.errors.tooSlow);
-    }
-    // The last check before acting: the user may have changed things meanwhile.
-    this.stillValid(job);
-    await this.send({ connection, job, plan, deadline });
+  /** The room of a device of the model (0: none, the device alone). */
+  roomOf(parsed) {
+    return this.model?.devices.find((d) => d.kind === parsed.kind && d.serial === parsed.id)
+      ?.roomId;
   }
 
-  /** What to send, decided on the fresh read only: { already } or { label, base64 }. */
+  /**
+   * A stop arrives: the commands of its room not yet written that arrived
+   * before it are cancelled, a read in flight is cut, then it runs in the
+   * stop lane.
+   */
+  queueStop(job) {
+    const room = this.roomOf(job.parsed);
+    const sameTarget = (other) =>
+      room > 0 ? this.roomOf(other.parsed) === room : other.parsed.id === job.parsed.id;
+    for (const other of this.commands) {
+      if (sameTarget(other)) other.cancelled = true;
+    }
+    this.commands = this.commands.filter((other) => {
+      if (!other.cancelled) return true;
+      other.reject(new Error(T.errors.cancelledByStop));
+      return false;
+    });
+    if (this.active && !this.active.written && sameTarget(this.active)) {
+      this.active.cancelled = true;
+    }
+    this.preempt();
+    const run = this.stops.then(() => this.runStop(job));
+    this.stops = run.then(noop, noop);
+    return run;
+  }
+
+  /** A read in flight (of the loop or of a command) is cut: the stop needs the line now. */
+  preempt() {
+    const connection = this.connection;
+    if (!connection || connection.closed) return;
+    if (connection.inFlight === 'L' || connection.stalled(TIMEOUTS.STALL, this.monotonic())) {
+      if (this.active && !this.active.written) this.active.cancelled = true;
+      this.logger.info('A read in flight is cut for a stop');
+      this.dropConnection({ preempted: true });
+    }
+  }
+
+  /** The stop: identity only, sent with priority, within its own budget. */
+  async runStop(job) {
+    if (job.generation !== this.generation || !this.config.cube) {
+      throw new Error(T.errors.configChanged);
+    }
+    const deadline = job.received + COMMAND_BUDGET_MS;
+    // Its turn may come after another stop: cut again what started meanwhile.
+    this.preempt();
+    this.uses += 1;
+    let handedOff = false;
+    try {
+      let connection;
+      try {
+        const left = deadline - COMMAND_MIN_SEND_MS / 2 - this.monotonic();
+        if (left < 1) throw Object.assign(new Error('late'), { kind: ERROR_KINDS.LATE });
+        // An opening in progress (one client only) is waited for, within the budget.
+        ({ connection } = await this.within(
+          this.acquire(Math.min(TIMEOUTS.CONNECT, left)),
+          left,
+          'late',
+        ));
+      } catch (err) {
+        throw refusal(T.errors.stopNotSent(err), err);
+      }
+      if (job.generation !== this.generation) throw new Error(T.errors.configChanged);
+      const item = this.model?.devices.find(
+        (d) => d.kind === job.parsed.kind && d.serial === job.parsed.id,
+      );
+      if (!item) throw new Error(T.errors.gone);
+      const plan = {
+        label: `stop of a ${item.kind}`,
+        item,
+        expect: { mode: MODES.MANUAL, target: OFF_TEMPERATURE },
+        base64: buildTemperatureCommand({
+          rfAddress: item.rfAddress,
+          roomId: item.roomId,
+          temperature: OFF_TEMPERATURE,
+          mode: MODES.MANUAL,
+        }),
+      };
+      handedOff = true;
+      return await this.send({ connection, job, plan, deadline, priority: true });
+    } finally {
+      if (!handedOff) this.release();
+    }
+  }
+
+  async command(job) {
+    const { parsed, command } = job;
+    this.stillValid(job);
+    const deadline = job.received + COMMAND_BUDGET_MS;
+    if (deadline - this.monotonic() < COMMAND_MIN_READ_MS) throw new Error(T.errors.tooSlow);
+    this.uses += 1;
+    let handedOff = false;
+    try {
+      // The fresh read: the greeting of a new connection, or `l:` on the one open.
+      let connection;
+      try {
+        const left = () => deadline - COMMAND_MIN_SEND_MS - this.monotonic();
+        const acquired = await this.acquire(Math.min(TIMEOUTS.CONNECT, left()));
+        connection = acquired.connection;
+        if (job.cancelled) throw new Error(T.errors.cancelledByStop);
+        if (!acquired.opened) {
+          const entries = await connection.requestList(Math.min(TIMEOUTS.LIST, left()));
+          if (connection !== this.connection) throw new Error(T.errors.configChanged);
+          this.applyList(this.model, entries);
+        }
+      } catch (err) {
+        if (job.cancelled) throw new Error(T.errors.cancelledByStop, { cause: err });
+        if (err?.message === T.errors.configChanged) throw err;
+        throw refusal(T.errors.unknownState(err), err);
+      }
+      this.stillValid(job);
+      if (this.online) void this.publishStates();
+      const plan = this.plan(parsed, command);
+      if (plan.already) return;
+      // The radio budget of the Cube: a command it would hold for up to an hour is not sent.
+      const duty = this.duty();
+      if (duty && (duty.dutyCycle >= DUTY_CYCLE_REFUSE || duty.freeSlots === 0)) {
+        throw new Error(T.errors.radioLow(duty.dutyCycle));
+      }
+      if (deadline - this.monotonic() < COMMAND_MIN_SEND_MS) throw new Error(T.errors.tooSlow);
+      // The last check before acting: the user may have changed things meanwhile.
+      this.stillValid(job);
+      handedOff = true;
+      return await this.send({ connection, job, plan, deadline });
+    } finally {
+      if (!handedOff) this.release();
+    }
+  }
+
+  /** The thermostats of the room of `item` (the command goes to the whole room), `item` first. */
+  roomDevices(item) {
+    if (!(item.roomId > 0)) return [item];
+    const others = this.model.devices.filter(
+      (d) =>
+        d !== item &&
+        d.roomId === item.roomId &&
+        (d.kind === KINDS.THERMOSTAT || d.kind === KINDS.WALL),
+    );
+    return [item, ...others];
+  }
+
+  /** What to send, decided on the fresh read only: { already } or { label, base64, expect }. */
   plan(parsed, command) {
     const item = this.model?.devices.find((d) => d.kind === parsed.kind && d.serial === parsed.id);
     if (!item) throw new Error(T.errors.gone);
     const state = item.state;
-    if (!state || state.target === undefined || state.target <= 0) {
-      throw new Error(T.errors.notHeard);
+    if (!state || state.target === undefined) throw new Error(T.errors.notHeard);
+    if (!usable(state)) throw new Error(T.errors.notUsable);
+    const room = this.roomDevices(item);
+    // Bounds: those of every thermostat of the room (the room follows the command).
+    let bounds = { min: SETPOINT.MIN, max: SETPOINT.MAX };
+    for (const d of room) {
+      const own = setpointBounds(d.config);
+      if (!own) throw new Error(T.errors.badBounds);
+      bounds = { min: Math.max(bounds.min, own.min), max: Math.min(bounds.max, own.max) };
     }
-    const bounds = setpointBounds(item.config);
-    if (!bounds) throw new Error(T.errors.badBounds);
+    if (bounds.min > bounds.max) throw new Error(T.errors.badBounds);
+    // "Already": only when every thermostat of the room shows it on valid values.
+    const already = (expect) => room.every((d) => applied(expect, d.state));
     const build = (temperature, mode) => ({
-      label: `${command.action} of ${parsed.kind} ${parsed.id}`,
+      label: `${command.action} of a ${parsed.kind}`,
+      item,
+      expect: { mode, target: temperature },
       base64: buildTemperatureCommand({
         rfAddress: item.rfAddress,
         roomId: item.roomId,
@@ -834,9 +1122,11 @@ export class MaxCubeApp {
         mode,
       }),
     });
-    const manual = state.mode === MODES.MANUAL;
+    const isOff = state.mode === MODES.MANUAL && state.target <= OFF_TEMPERATURE;
     switch (command.action) {
       case 'setpoint': {
+        // A setpoint on a thermostat that is off starts it again: a mode command.
+        if (isOff && !this.config.allowMode) throw new Error(T.errors.offNeedsMode);
         // Half degrees: the resolution of the thermostat; the bounds are
         // checked on the value asked and on the rounded one, never clamped.
         const temperature = Math.round(command.value * 2) / 2;
@@ -851,23 +1141,15 @@ export class MaxCubeApp {
         // In auto: the setpoint until the next switch point of the programme;
         // otherwise manual (a boost or a vacation ends).
         const mode = state.mode === MODES.AUTO ? MODES.AUTO : MODES.MANUAL;
-        if (state.target === temperature && (mode === MODES.AUTO || manual)) {
-          return { already: true };
-        }
+        if (already({ mode, target: temperature })) return { already: true };
         return build(temperature, mode);
       }
-      case 'mode': {
-        if (command.value === THERMOSTAT_MODE.AUTO) {
-          if (state.mode === MODES.AUTO) return { already: true };
-          return build(0, MODES.AUTO);
-        }
-        if (command.value === THERMOSTAT_MODE.OFF) {
-          if (manual && state.target <= OFF_TEMPERATURE) return { already: true };
-          return build(OFF_TEMPERATURE, MODES.MANUAL);
-        }
-        // Heating: manual at the current setpoint, or at the comfort
-        // temperature of the device when the valve is closed.
-        if (manual && state.target >= bounds.min) return { already: true };
+      case 'auto':
+        if (already({ mode: MODES.AUTO, target: 0 })) return { already: true };
+        return build(0, MODES.AUTO);
+      case 'heating': {
+        // Manual at the current setpoint, or at the comfort temperature of
+        // the device when the valve is closed.
         let temperature = state.target;
         if (!(temperature >= bounds.min && temperature <= bounds.max)) {
           const comfort = item.config?.comfort;
@@ -876,6 +1158,7 @@ export class MaxCubeApp {
           }
           temperature = comfort;
         }
+        if (already({ mode: MODES.MANUAL, target: temperature })) return { already: true };
         return build(temperature, MODES.MANUAL);
       }
       default:
@@ -884,26 +1167,32 @@ export class MaxCubeApp {
   }
 
   /**
-   * Send, then answer Gladys on the Cube's answer or at COMMAND_ACK_MS,
-   * whichever first. Whatever the outcome once it may have left, the Cube is
-   * read again soon to show what it holds.
+   * Send, then answer Gladys on the Cube's answer or at COMMAND_ACK_MS after
+   * the arrival (monotonic), whichever first. Once it may have left, the
+   * follow-up reads check it on the device.
    */
-  async send({ connection, job, plan, deadline }) {
-    let sent = false;
+  async send({ connection, job, plan, deadline, priority = false }) {
+    let writtenAt;
     const request = connection.send(plan.base64, TIMEOUTS.SEND, {
+      priority,
       beforeSend: () => {
-        this.stillValid(job);
-        if (this.now() > deadline) {
-          throw Object.assign(new Error('too late'), { kind: ERROR_KINDS.LATE });
+        if (job.cancelled) throw new Error(T.errors.cancelledByStop);
+        if (job.generation !== this.generation || !this.config.cube) {
+          throw new Error(T.errors.configChanged);
         }
-        sent = true;
+        if (!job.command.protective) this.checkPermission(job.command);
+        const mono = this.monotonic();
+        if (mono > deadline) throw Object.assign(new Error('too late'), { kind: ERROR_KINDS.LATE });
+        writtenAt = mono;
+        job.written = true;
       },
     });
+    this.releaseAfter(request);
     let handle;
     const ack = new Promise((resolve) => {
       handle = this.timers.setTimeout(
         resolve,
-        Math.max(0, job.received + COMMAND_ACK_MS - this.now()),
+        Math.max(0, job.received + COMMAND_ACK_MS - this.monotonic()),
       );
     });
     const outcome = await Promise.race([
@@ -914,55 +1203,49 @@ export class MaxCubeApp {
       ack.then(() => ({ pending: true })),
     ]);
     this.timers.clearTimeout(handle);
-    if (sent && job.generation === this.generation) this.readSoon();
+    if (writtenAt !== undefined && job.generation === this.generation) {
+      // A new command for this device replaces what was expected of the last one.
+      this.expectations.set(plan.item.serial, {
+        kind: plan.item.kind,
+        action: job.command.action,
+        ...plan.expect,
+        sentAt: writtenAt,
+        resends: 0,
+        failed: false,
+      });
+      this.addFollowUps(writtenAt);
+    }
     if (outcome.done) {
-      if (this.model) {
-        this.model.cube.dutyCycle = outcome.answer.dutyCycle;
-        this.model.cube.freeSlots = outcome.answer.freeSlots;
+      this.noteAnswer(outcome.answer);
+      const { dutyCycle, freeSlots } = outcome.answer;
+      if (dutyCycle >= 100 || freeSlots === 0) {
+        this.logger.warn(`${plan.label} queued by the Cube (radio budget)`);
+        throw new Error(T.errors.queued);
       }
       this.logger.info(`${plan.label} accepted by the Cube`);
-      this.release(request);
       return;
     }
     if (outcome.pending) {
-      // Sent, the Cube still at work: Gladys is told exactly that.
-      request.catch((err) =>
-        this.logger.warn(`${plan.label} not confirmed: ${err?.kind ?? 'error'}`),
+      request.then(
+        (answer) => this.noteAnswer(answer),
+        (err) => {
+          this.noteAnswer(err?.answer);
+          this.logger.warn(`${plan.label} not confirmed: ${err?.kind ?? 'error'}`);
+        },
       );
-      this.release(request);
+      if (writtenAt === undefined) throw new Error(T.errors.notSent({ kind: ERROR_KINDS.TIMEOUT }));
       this.logger.info(`${plan.label} sent, the Cube has not answered yet`);
-      if (!sent) throw new Error(T.errors.notSent({ kind: ERROR_KINDS.TIMEOUT }));
       throw new Error(T.errors.unconfirmed({ kind: ERROR_KINDS.TIMEOUT }));
     }
     const { err } = outcome;
-    this.release(request);
-    if (err?.notSent || !sent) throw new Error(T.errors.notSent(err), { cause: err });
+    if (job.cancelled && writtenAt === undefined) throw new Error(T.errors.cancelledByStop);
+    if (err?.message === T.errors.configChanged) throw err;
+    if (err?.notSent || writtenAt === undefined) throw refusal(T.errors.notSent(err), err);
     if (err?.kind === ERROR_KINDS.REJECTED) {
-      if (this.model && err.answer) {
-        this.model.cube.dutyCycle = err.answer.dutyCycle;
-        this.model.cube.freeSlots = err.answer.freeSlots;
-      }
-      throw new Error(T.errors.rejected, { cause: err });
+      this.noteAnswer(err.answer);
+      throw refusal(T.errors.rejected, err);
     }
-    throw new Error(T.errors.unconfirmed(err), { cause: err });
-  }
-
-  /** With `keep_connection` off, the connection is closed once the exchange in flight ends. */
-  release(request = Promise.resolve()) {
-    if (this.config.keepConnection) return;
-    const connection = this.connection;
-    request.then(noop, noop).then(() => {
-      if (this.connection === connection) this.dropConnection({ quit: true });
-    });
-  }
-
-  /** Read the Cube again soon (after a command): the loop restarts from there. */
-  readSoon() {
-    if (!this.config.cube) return;
-    const mono = this.monotonic();
-    this.followUpAt = mono + READ_AFTER_COMMAND_MS;
-    this.nextTryAt = undefined;
-    if (!this.gladysAway) this.schedule(mono);
+    throw refusal(T.errors.unconfirmed(err), err);
   }
 
   // --- Configuration screen button ----------------------------------------------------
@@ -971,7 +1254,10 @@ export class MaxCubeApp {
   within(promise, ms, message) {
     let handle;
     const limit = new Promise((_, reject) => {
-      handle = this.timers.setTimeout(() => reject(new Error(message)), ms);
+      handle = this.timers.setTimeout(
+        () => reject(Object.assign(new Error(message), { kind: ERROR_KINDS.TIMEOUT })),
+        ms,
+      );
     });
     return Promise.race([promise, limit]).finally(() => this.timers.clearTimeout(handle));
   }

@@ -231,10 +231,14 @@ test('L: the state of each device type from our encoder', () => {
 test('L: a truncated or hostile list throws, an empty one is empty', () => {
   assert.deepEqual(parseL(''), []);
   assert.throws(() => parseL(Buffer.from([11, 1, 2, 3]).toString('base64')), ProtocolError);
-  assert.throws(
-    () => parseL(Buffer.from([2, 1, 2]).toString('base64')),
-    ProtocolError,
-    'too short',
+  // An entry too short for any device is skipped, the next one read.
+  const short = Buffer.concat([
+    Buffer.from([3, 1, 2, 3]),
+    Buffer.from(encodeL([[TRV, {}]]).slice(2), 'base64'),
+  ]);
+  assert.deepEqual(
+    parseL(short.toString('base64')).map((e) => e.rfAddress),
+    ['0AED69'],
   );
   assert.throws(() => parseL('not base64!'), ProtocolError);
   const many = Buffer.alloc((LIMITS.LIST_ENTRIES + 1) * 7, 6);
