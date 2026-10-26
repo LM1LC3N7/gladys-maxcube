@@ -53,6 +53,8 @@ async function slowCube({
     listDelay,
     sendDelay,
     ignoreSend: false,
+    /** The greeting line by line, this many ms apart (a slow Cube still talking). */
+    trickleMs: 0,
     sockets: [],
   };
   const greeting = () =>
@@ -79,9 +81,15 @@ async function slowCube({
       cube.open -= 1;
     });
     if (cube.greetDelay >= 0) {
-      later(socket, Math.max(0, cube.mutedUntil - performance.now() + 5, cube.greetDelay), () =>
-        socket.write(greeting(), 'latin1'),
-      );
+      const start = Math.max(0, cube.mutedUntil - performance.now() + 5, cube.greetDelay);
+      if (cube.trickleMs > 0) {
+        const lines = greeting().split(/(?<=\r\n)/);
+        lines.forEach((line, i) =>
+          later(socket, start + i * cube.trickleMs, () => socket.write(line, 'latin1')),
+        );
+      } else {
+        later(socket, start, () => socket.write(greeting(), 'latin1'));
+      }
     }
     let pending = '';
     socket.on('data', (data) => {
@@ -275,6 +283,59 @@ test('GREET: a stop during a greeting that never comes (keep_connection off): cu
     assert.equal(sends.length, 1);
     assert.ok(sends[0].at - asked < COMMAND_BUDGET_MS, 'written within 3.5 s');
     assert.equal(cube.peak, 1);
+    assert.equal(cube.refused, 0, 'the cut greeting closed before the new connection');
+  } finally {
+    await app.stop();
+    await cube.close();
+  }
+});
+
+test('a slow greeting still coming is waited for by a stop, never cut', async () => {
+  const cube = await slowCube();
+  const { app, set } = await running(cube, { keep_connection: false });
+  try {
+    await sleep(300);
+    cube.trickleMs = 300; // a line every 0.3 s: about 2 s in all, no pause of 1 s
+    app.lastReadAt = -1e9;
+    void app.read(app.generation, app.epoch);
+    await sleep(100);
+    const before = cube.connections;
+    const stop = await set('thermostat', TRV.serial, 'mode', 0);
+    assert.equal(stop.success, true, stop.error);
+    assert.equal(cube.connections, before, 'no new connection: the greeting was not cut');
+    assert.equal(cube.sends().length, 1);
+  } finally {
+    await app.stop();
+    await cube.close();
+  }
+});
+
+test('r3: a stop kept for the next read, then heating of the room already so: the stop never leaves', async () => {
+  const devices = [1, 2, 3, 4, 5].map((r) => ({
+    type: 1,
+    rf: `0A000${r}`,
+    serial: `KEQ000000${r}`,
+    name: `T${r}`,
+    room: r,
+  }));
+  const rooms = devices.map((d) => ({ id: d.room, name: `Room ${d.room}`, rf: d.rf }));
+  const states = devices.map((d, i) => [
+    d,
+    i === 4 ? { mode: 1, valve: 20, target: 21 } : { mode: 0, valve: 20, target: 21 },
+  ]);
+  const cube = await slowCube({ devices, rooms, states, sendDelay: 900 });
+  const { app, set } = await running(cube);
+  try {
+    const acks = await Promise.all(devices.map((d) => set('thermostat', d.serial, 'mode', 0)));
+    assert.match(acks[4].error ?? '', /Stop not sent yet/, 'the 5th stop is kept');
+    const heat = await set('thermostat', 'KEQ0000005', 'mode', 1);
+    assert.equal(heat.success, true, heat.error);
+    await sleep(8000);
+    assert.deepEqual(
+      cube.sends().filter((w) => roomOf(w) === 5),
+      [],
+      'no stop for room 5 after the heating',
+    );
   } finally {
     await app.stop();
     await cube.close();

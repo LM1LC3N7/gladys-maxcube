@@ -126,6 +126,8 @@ export class CubeConnection {
 
   onData(data) {
     if (this.closed) return;
+    // A greeting still coming is never cut for a stop (app.js clearWay).
+    this.lastDataAt = this.monotonic();
     const chunk = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'latin1');
     let start = 0;
     for (;;) {

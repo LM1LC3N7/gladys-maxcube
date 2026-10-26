@@ -654,6 +654,13 @@ export class MaxCubeApp {
     return roomId > 0 ? `room:${roomId}` : `device:${kind}:${serial}`;
   }
 
+  /** A command accepted for the room of `parsed` replaces the stop it expected (kept or unconfirmed). */
+  forgetStopOf(parsed) {
+    const item = this.model?.devices.find((d) => d.kind === parsed.kind && d.serial === parsed.id);
+    const key = this.targetKey(parsed.kind, parsed.id, item?.roomId);
+    if (this.expectations.get(key)?.action === 'stop') this.expectations.delete(key);
+  }
+
   /** A stop that could not be written within its budget: kept, sent by the next read. */
   keepPendingStop(job) {
     const item = this.model?.devices.find(
@@ -1096,8 +1103,13 @@ export class MaxCubeApp {
       const mono = this.monotonic();
       const connection = this.connection;
       const greeting = this.openingConnection;
-      if (greeting && mono - this.openingSince >= STOP_CUT_AFTER_MS) {
+      // A greeting is cut only when nothing has come for 1 s (a slow one still coming is waited for).
+      const quietSince = Math.max(this.openingSince ?? mono, greeting?.lastDataAt ?? -Infinity);
+      if (greeting && mono - quietSince >= STOP_CUT_AFTER_MS) {
         this.logger.info('A greeting that does not come is cut for a stop');
+        // Like any connection closed: the next one waits for its close (one client slot).
+        this.lastDropped = greeting;
+        this.lastDroppedAt = mono;
         greeting.close({ preempted: true });
         return;
       }
@@ -1155,10 +1167,12 @@ export class MaxCubeApp {
   /** One try of a stop; an error before the write is `retryable`. */
   async tryStop(job, deadline) {
     const retry = (err) => Object.assign(err ?? new Error('retry'), { retryable: true });
-    await this.clearWay(deadline);
+    // Held from now: with keep_connection off, the connection a read just
+    // opened is not closed under the stop.
     this.uses += 1;
     let handedOff = false;
     try {
+      await this.clearWay(deadline);
       let connection;
       try {
         const left = deadline - this.monotonic();
@@ -1221,7 +1235,12 @@ export class MaxCubeApp {
       this.stillValid(job);
       if (this.online) void this.publishStates();
       const plan = this.plan(parsed, command);
-      if (plan.already) return;
+      if (plan.already) {
+        // Accepted for the room: a stop kept or not yet confirmed there is
+        // replaced, as a written command would replace it.
+        this.forgetStopOf(parsed);
+        return;
+      }
       // The radio budget of the Cube: a command it would hold for up to an hour is not sent.
       const duty = this.duty();
       if (duty && (duty.dutyCycle >= DUTY_CYCLE_REFUSE || duty.freeSlots === 0)) {

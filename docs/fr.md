@@ -107,7 +107,7 @@ s'il semble déjà à l'arrêt. Il passe **avant** les autres commandes :
 - les commandes de la même pièce demandées avant lui et pas encore envoyées
   sont annulées (« annulée : un arrêt a été demandé ») ;
 - une lecture du Cube sans réponse depuis 1 s, ou une connexion dont
-  l'accueil du Cube n'arrive pas depuis 1 s, est coupée (une lecture plus
+  l'accueil du Cube est muet depuis 1 s (aucun octet), est coupée (une lecture plus
   récente est attendue : le Cube y répond en quelques millisecondes) ;
 - il n'attend que la réponse d'une commande déjà envoyée (2 s au plus) ;
 - après une connexion fermée, il attend que le Cube libère sa place (il
@@ -135,8 +135,9 @@ fois au plus (pas quand le budget radio frais du Cube atteint 90 %) ; s'il ne
 l'a toujours pas appliqué 2 min après le dernier envoi (budget radio compris),
 les journaux et l'état de l'intégration le disent (« l'arrêt n'a pas été
 appliqué par … »), jusqu'à ce que l'appareil le montre. Une commande plus
-récente envoyée à la même pièce (consigne, chauffage, auto) remplace l'arrêt :
-il n'est alors plus renvoyé.
+récente acceptée pour la même pièce (consigne, chauffage, auto), qu'elle soit
+envoyée ou déjà faite, remplace l'arrêt : il n'est alors plus envoyé ni
+renvoyé.
 
 ### Consigne, chauffage, auto
 

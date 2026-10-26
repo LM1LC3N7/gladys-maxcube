@@ -511,3 +511,30 @@ test('r2-1: a stop that cannot leave in its budget is kept and sent by the next 
   assert.equal(byteOf(cube.sent[0]), 0x49);
   assert.doesNotMatch(status(gladys).message.fr, /pas encore pu être envoyé/);
 });
+
+// --- Review r3 --------------------------------------------------------------------------
+
+test('r3-1: a command of the room accepted as "already set" replaces a kept stop', async () => {
+  const cube = createFakeCube({
+    states: [
+      [TRV, { mode: MODES.MANUAL, valve: 20, target: 21 }],
+      [WALL, { mode: MODES.MANUAL, target: 21 }],
+    ],
+  });
+  const { gladys, start, createAll, advance, wait } = await setup({ cube, config: ALLOW });
+  await start();
+  await createAll();
+  cube.dropAll();
+  cube.refuse = true;
+  const pending = command(gladys, 'thermostat', TRV.serial, 'mode', 0);
+  await advance(4000);
+  assert.match((await pending).error, /Stop not sent yet/);
+  cube.refuse = false;
+  // Heating on the same room, already so: OK, nothing written...
+  assert.deepEqual(await command(gladys, 'wall', WALL.serial, 'mode', 1), { success: true });
+  // ...and the kept stop never leaves after it.
+  await wait(10 * SECOND);
+  await wait(MINUTE);
+  assert.equal(cube.sent.length, 0);
+  assert.doesNotMatch(status(gladys).message.fr, /pas encore pu être envoyé/);
+});

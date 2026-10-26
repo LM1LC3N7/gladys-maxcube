@@ -146,8 +146,10 @@ up to date at the end of every milestone.
   included): warn log and a status note naming the device. Expectations are
   kept by room (a write reaches the room): a newer command written to the
   room replaces the stop, and a resend is written only while it is still
-  the newest of its room. A slow greeting (over 1 s) is cut too: the stop
-  then leaves at the next read.
+  the newest of its room; a command of the room accepted as "already set"
+  also removes a kept or unconfirmed stop (r3). A greeting is cut only after
+  1 s without a byte (a slow one still coming is waited for), and like any
+  closed connection the next one waits for its close plus 200 ms (r3).
 - **Setpoint, auto, heating**: `allow_setpoint` and `allow_mode`, off by
   default, checked when the command arrives AND just before the write; a
   permission taken away applies at once (`restrict`). Decided on the L
