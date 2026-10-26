@@ -1,6 +1,6 @@
 {
   "name": "gladys-maxcube",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for the eQ-3 MAX! Cube through its local TCP port: radiator and wall thermostats (temperature, setpoint, mode, valve, battery) and window contacts. Unofficial, not affiliated with eQ-3.",
   "type": "module",

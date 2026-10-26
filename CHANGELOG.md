@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-26
+
 ### Added
 
 - First version, never tested with a real Cube: the eQ-3 MAX! Cube through
@@ -38,4 +40,5 @@ the notes of the version's GitHub Release.
   configuration Gladys cannot give asked again without end.
 - Button "Test the connection".
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-maxcube/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-maxcube/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-maxcube/releases/tag/v0.1.1
