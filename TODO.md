@@ -29,6 +29,11 @@ up to date at the end of every milestone.
       commands confirmed on the follow-up reads; valid values only; radio
       budget; monotonic budgets; per-device isolation of C and L; the
       configuration read again without end; docs with exact refusal lists.
+- [x] **Review r2 fixes** (2026-10-26): off on a Cube with one client slot
+      (wait 1 s before cutting, wait for the close before reopening, retries
+      every 250 ms, pending stop sent by the next read), expectations by room,
+      the radio budget no longer hides an unapplied stop; real-TCP tests on a
+      one-client Cube.
 - [ ] **Milestone 2 — real Cube** (a tester with a Cube and a few
       thermostats): record a real greeting as a fixture (serials replaced),
       fix what differs. To check first:
@@ -124,18 +129,25 @@ up to date at the end of every milestone.
   needs no option (`allow_mode` covers auto and heating only), no bounds and
   no values, only the device in the metadata of the connection (which
   cannot change while we hold the one client slot; a new connection reads
-  it again). Always sent (idempotent, never "already off"). At its arrival:
-  the queued commands of its room are cancelled, the running one too if not
-  written yet; a read in flight (loop or command) or an exchange stalled for
-  2.5 s cuts the connection (the cut read is not a failure: read again 5 s
-  later) and the stop opens a new one; it goes ahead of every exchange still
-  waiting (priority queue of the connection) and only waits for the answer
-  to an exchange already written (2 s at most). An opening in progress is
-  waited for (the Cube accepts one client), within the 3.5 s budget.
-  Checked on the follow-up reads: not applied 1 min after a write, sent
-  again, 3 times at most (not with a fresh duty cycle of 90 % or more);
-  still not applied 2 min after the last write: warn log and a status note
-  naming the device, until it shows it or another command replaces it.
+  it again). Sent even when the device seems off. At its arrival the queued
+  commands of its room are cancelled, the running one too if not written
+  yet; stops run side by side, ordered by the priority queue of the
+  connection (ahead of every exchange still waiting; an exchange already
+  written is waited for, 2 s at most). Decision of the r2 review: a read
+  (`l:`) or a greeting is cut only after 1 s without answer (the Cube serves
+  `l:` from memory in ms; cutting at once lost the stop on a Cube with one
+  client slot); a new connection waits for the socket of the old one to
+  close plus 200 ms. Any error before the write is tried again every 250 ms
+  until the 3.5 s budget; past it the stop is kept (pending, by room), said
+  in the status and to Gladys ("not sent yet"), and sent by the read 5 s
+  later, 3 tries at most. Checked on the follow-up reads: not applied 1 min
+  after a write, sent again, 3 times at most (not with a fresh duty cycle of
+  90 % or more); still not applied 2 min after the last write (radio budget
+  included): warn log and a status note naming the device. Expectations are
+  kept by room (a write reaches the room): a newer command written to the
+  room replaces the stop, and a resend is written only while it is still
+  the newest of its room. A slow greeting (over 1 s) is cut too: the stop
+  then leaves at the next read.
 - **Setpoint, auto, heating**: `allow_setpoint` and `allow_mode`, off by
   default, checked when the command arrives AND just before the write; a
   permission taken away applies at once (`restrict`). Decided on the L

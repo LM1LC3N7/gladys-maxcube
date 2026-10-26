@@ -20,31 +20,22 @@ the notes of the version's GitHub Release.
   opening, battery low, radio link error. Wall thermostats: temperature,
   setpoint, modes, battery, link. Window contacts: open / closed, battery,
   link. The Cube: radio duty cycle and free command slots.
-- Commands, off by default: the setpoint (5-30 °C by half degrees within the
-  bounds of the device, sent to the room as the MAX! software does) behind
-  `allow_setpoint`; the mode (auto, heating, off = manual 4.5 °C) behind
-  `allow_mode`. Live values asked to the Cube before acting, 3.5 s budget,
-  answer at 4.3 s at most, the Cube read again 5 s later. An off command goes
-  first and drops a connection that no longer answers.
+- Commands, to the room as the MAX! software does: the setpoint (5-30 °C by
+  half degrees within the bounds of the room) behind `allow_setpoint`, auto
+  and heating behind `allow_mode` (both off by default), decided on valid
+  live values asked to the Cube just before, 3.5 s budget, answer at 4.3 s at
+  most; refused on a radio budget of 90 % or more.
+- Off (manual 4.5 °C) without any option: ahead of the other commands,
+  tried again on a new connection within its budget (one client slot on the
+  Cube), kept and sent by the next read when the budget is not enough, sent
+  again up to 3 times when the thermostat does not apply it.
+- Commands checked on the reads 5 s, 30 s, 1 min and 2 min after them; only
+  valid values shown; one unreadable message of a device leaves the others
+  read.
 - The Cube read every minute, never sooner (a restart included: the time of
   the last read kept in `/data`); pushes of the Cube published at once;
-  retries 1 to 10 min; bounded lines, greeting and metadata.
+  retries 1 to 10 min; bounded lines, greeting and metadata; a
+  configuration Gladys cannot give asked again without end.
 - Button "Test the connection".
-
-### Changed
-
-- Off (the valve closed) needs no option and is never blocked by the bounds
-  or the values of the device: it cuts a read in progress, cancels the
-  commands of its room not sent yet, and is checked on the reads that follow
-  (sent again up to 3 times, then said in the status).
-- Commands are checked on the reads 5 s, 30 s, 1 min and 2 min after them;
-  only valid values are shown and used; a radio link error hides the cached
-  values; a radio budget of 90 % or more refuses the commands other than
-  off, and a command queued by the Cube is said so; the command budgets use
-  the monotonic clock; a setpoint no longer starts a thermostat that is off
-  without "Allow the mode commands"; the bounds and "already set" cover every
-  thermostat of the room.
-- One unreadable message of a device no longer stops the whole Cube; a
-  configuration Gladys cannot give is asked again without end.
 
 [Unreleased]: https://github.com/LM1LC3N7/gladys-maxcube/commits/main

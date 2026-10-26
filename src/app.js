@@ -72,6 +72,17 @@ import {
 import { T } from './i18n.js';
 import { createFileStore } from './store.js';
 
+/** A read or a greeting without answer for this long is cut for a stop (a live `l:` takes ms). */
+const STOP_CUT_AFTER_MS = 1_000;
+/** How often a stop looks again at what it waits for. */
+const STOP_POLL_MS = 50;
+/** A stop not written is tried again this often... */
+const STOP_RETRY_MS = 250;
+/** ...while this much of its budget is left. */
+const STOP_MIN_TRY_MS = 150;
+/** After a close, the Cube is given this long to free its one client slot. */
+export const REOPEN_DELAY_MS = 200;
+
 /** Entries per publishTransports call (the SDK refuses more). */
 const TRANSPORTS_PER_CALL = 100;
 /** The key of the last read attempt (wall clock) in /data. */
@@ -118,6 +129,7 @@ export class MaxCubeApp {
     monotonic = () => performance.now(),
     timers = globalThis,
     store = createFileStore(),
+    reopenDelayMs = REOPEN_DELAY_MS,
   }) {
     this.gladys = gladys;
     this.logger = logger;
@@ -126,6 +138,14 @@ export class MaxCubeApp {
     this.monotonic = monotonic;
     this.timers = timers;
     this.store = store;
+    /** After a close, the Cube is given this long to free its one client slot. */
+    this.reopenDelayMs = reopenDelayMs;
+    /** The connection closed last, and when (monotonic): a new one waits for its close. */
+    this.lastDropped = undefined;
+    this.lastDroppedAt = undefined;
+    /** The connection still greeting (an opening in progress), and since when. */
+    this.openingConnection = undefined;
+    this.openingSince = undefined;
     this.budget = new Budget({ perMinute: STATES_PER_MINUTE, now: monotonic });
     this.budgetCursor = 0;
     /** Whether a configuration was given (start): commands wait for it. */
@@ -145,8 +165,6 @@ export class MaxCubeApp {
     this.commands = [];
     this.active = undefined;
     this.pumping = false;
-    /** The stops, one after the other, never behind another command. */
-    this.stops = Promise.resolve();
     this.lastStatus = null;
     this.wantedStatus = null;
     this.gladysAway = false;
@@ -250,7 +268,19 @@ export class MaxCubeApp {
   dropConnection({ quit = false, preempted = false } = {}) {
     const connection = this.connection;
     this.connection = null;
-    connection?.close({ quit, preempted });
+    if (!connection) return;
+    this.lastDropped = connection;
+    this.lastDroppedAt = this.monotonic();
+    connection.close({ quit, preempted });
+  }
+
+  /** Waits until the connection closed last is closed and the Cube had time to free its slot. */
+  async settleClose() {
+    const dropped = this.lastDropped;
+    if (!dropped || this.reopenDelayMs <= 0) return;
+    await dropped.whenClosed(this.reopenDelayMs * 2);
+    const wait = this.lastDroppedAt + this.reopenDelayMs - this.monotonic();
+    if (wait > 0) await new Promise((resolve) => this.timers.setTimeout(resolve, wait));
   }
 
   async run(rawConfig) {
@@ -450,17 +480,30 @@ export class MaxCubeApp {
     const generation = this.generation;
     this.dropConnection({ quit: true });
     const address = this.config.cube;
+    const started = this.monotonic();
     this.opening = (async () => {
       let opened;
       try {
+        // One client only: the Cube must have seen the last connection close.
+        await this.settleClose();
+        const left = timeoutMs - (this.monotonic() - started);
+        if (left < 1) {
+          throw Object.assign(new Error('late'), { kind: ERROR_KINDS.LATE, notSent: true });
+        }
         opened = await openConnection(address, {
           connect: this.connect,
-          timeoutMs,
+          timeoutMs: left,
           timers: this.timers,
           monotonic: this.monotonic,
+          onConnection: (connection) => {
+            this.openingConnection = connection;
+            this.openingSince = this.monotonic();
+          },
         });
       } finally {
         this.opening = null;
+        this.openingConnection = undefined;
+        this.openingSince = undefined;
       }
       if (generation !== this.generation || this.connection) {
         // Stopped or replaced meanwhile: this one is not kept.
@@ -606,63 +649,119 @@ export class MaxCubeApp {
     await this.setStatus(true, this.okMessage());
   }
 
+  /** The key of what a write to `item` reaches: its room (the command goes to the room), or itself. */
+  targetKey(kind, serial, roomId) {
+    return roomId > 0 ? `room:${roomId}` : `device:${kind}:${serial}`;
+  }
+
+  /** A stop that could not be written within its budget: kept, sent by the next read. */
+  keepPendingStop(job) {
+    const item = this.model?.devices.find(
+      (d) => d.kind === job.parsed.kind && d.serial === job.parsed.id,
+    );
+    const key = this.targetKey(job.parsed.kind, job.parsed.id, item?.roomId);
+    const known = this.expectations.get(key);
+    this.expectations.set(key, {
+      kind: job.parsed.kind,
+      serial: job.parsed.id,
+      action: 'stop',
+      mode: MODES.MANUAL,
+      target: OFF_TEMPERATURE,
+      sentAt: this.monotonic(),
+      resends: known?.action === 'stop' ? known.resends : 0,
+      pending: true,
+      failed: false,
+    });
+    this.followUps = [this.monotonic() + FOLLOW_UPS_MS[0], ...this.followUps].sort((a, b) => a - b);
+    if (!this.gladysAway && this.config.cube) this.schedule();
+    // The status says it at once (the user should check the radiator).
+    if (this.online && this.model) void this.setStatus(true, this.okMessage());
+  }
+
   /**
-   * The follow-up reads: each command checked against the device. A stop not
-   * applied is sent again (3 times at most); any command still not applied
-   * 2 min after its last write is said in the logs (and in the status for a
-   * stop, until the device shows it or another command replaces it).
+   * The follow-up reads: each command checked against the device it was
+   * sent to. A stop not written yet (pending) is sent at the next read; a
+   * stop not applied 1 min after its write is sent again; 3 times at most
+   * either way. Any command still not applied 2 min after its last write (or
+   * a stop still not written) is said in the logs, and in the status for a
+   * stop, until the device shows it or a newer command for its room
+   * replaces it.
    */
   verify(mono) {
-    for (const [serial, expect] of this.expectations) {
-      const item = this.model?.devices.find((d) => d.serial === serial && d.kind === expect.kind);
+    for (const [key, expect] of this.expectations) {
+      const item = this.model?.devices.find(
+        (d) => d.serial === expect.serial && d.kind === expect.kind,
+      );
       if (!item) {
-        this.expectations.delete(serial);
+        this.expectations.delete(key);
         continue;
       }
-      if (applied(expect, item.state)) {
+      if (!expect.pending && applied(expect, item.state)) {
         if (expect.failed) this.logger.info(`A ${expect.action} was applied in the end`);
-        this.expectations.delete(serial);
+        this.expectations.delete(key);
         continue;
       }
       const since = mono - expect.sentAt;
-      if (expect.action === 'stop' && expect.resends < STOP_RESENDS) {
-        if (since >= STOP_RESEND_AFTER_MS && !expect.resending)
-          void this.resendStop(serial, expect);
-        continue;
+      if (expect.action === 'stop' && expect.resends < STOP_RESENDS && !expect.resending) {
+        const due = expect.pending || since >= STOP_RESEND_AFTER_MS;
+        if (due && !this.radioLow()) {
+          void this.resendStop(key, expect);
+          continue;
+        }
+        // Held by the radio budget: the time limit below applies all the same.
+        if (due) expect.radio = true;
       }
-      if (since >= VERIFY_GIVE_UP_MS && !expect.failed) {
+      if (since >= VERIFY_GIVE_UP_MS && !expect.failed && !expect.resending) {
         expect.failed = true;
+        const why = expect.radio ? ', radio budget of the Cube' : '';
         this.logger.warn(
-          `A ${expect.action} sent to a ${expect.kind} was not applied (${expect.resends + 1} send(s))`,
+          expect.pending
+            ? `A stop for a ${expect.kind} could not be sent (${expect.resends + 1} tries${why})`
+            : `A ${expect.action} sent to a ${expect.kind} was not applied (${expect.resends + 1} send(s)${why})`,
         );
-        if (expect.action !== 'stop') this.expectations.delete(serial);
+        if (expect.action !== 'stop') this.expectations.delete(key);
       }
     }
   }
 
-  /** A stop not seen applied: sent again through the stop lane (never past a fresh radio budget). */
-  async resendStop(serial, expect) {
+  /** A fresh duty cycle of 90 % or more, or no free slot. */
+  radioLow() {
     const duty = this.duty();
-    if (duty && (duty.dutyCycle >= DUTY_CYCLE_REFUSE || duty.freeSlots === 0)) return;
+    return Boolean(duty && (duty.dutyCycle >= DUTY_CYCLE_REFUSE || duty.freeSlots === 0));
+  }
+
+  /**
+   * A stop sent again (or for the first time when it was pending). It is
+   * written only while it is still the newest command of its room: a command
+   * written for the room meanwhile replaces it.
+   */
+  async resendStop(key, expect) {
     // Counted when tried: a resend that cannot leave is not tried for ever.
     const attempt = expect.resends + 1;
     expect.resends = attempt;
     expect.resending = true;
     try {
       const job = this.newJob(
-        { kind: expect.kind, id: serial },
+        { kind: expect.kind, id: expect.serial },
         { action: 'stop', value: THERMOSTAT_MODE.OFF, protective: true },
       );
-      this.logger.warn(`A stop was not applied by a ${expect.kind}: sent again (${attempt})`);
+      job.internal = true;
+      job.guard = () => this.expectations.get(key) === expect;
+      this.logger.warn(
+        expect.pending
+          ? `A stop for a ${expect.kind} not sent yet: sent now (${attempt})`
+          : `A stop was not applied by a ${expect.kind}: sent again (${attempt})`,
+      );
       await this.runStop(job);
     } catch (err) {
       this.logger.warn(`Sending the stop again failed (${err?.cause?.kind ?? 'error'})`);
     } finally {
       expect.resending = false;
     }
-    // The new write replaced the expectation: it keeps the count.
-    const next = this.expectations.get(serial);
+    // A new write of this stop replaced the expectation: it keeps the count.
+    const next = this.expectations.get(key);
     if (next && next !== expect && next.action === 'stop') next.resends = attempt;
+    if (this.online && this.model) await this.setStatus(true, this.okMessage());
   }
 
   /**
@@ -703,11 +802,20 @@ export class MaxCubeApp {
     if (link) notes.push(T.notes.linkError(link));
     const battery = model.devices.filter((d) => d.state?.batteryLow).length;
     if (battery) notes.push(T.notes.batteryLow(battery));
-    const failedStops = [...this.expectations.entries()]
-      .filter(([, e]) => e.action === 'stop' && e.failed)
-      .map(([serial]) => model.devices.find((d) => d.serial === serial))
-      .filter(Boolean)
-      .map((d) => (d.roomName ? `${d.roomName} - ${d.name}` : d.name));
+    const label = (e) => {
+      const d = model.devices.find((x) => x.serial === e.serial && x.kind === e.kind);
+      return d && (d.roomName ? `${d.roomName} - ${d.name}` : d.name);
+    };
+    const stops = [...this.expectations.values()].filter((e) => e.action === 'stop');
+    const pending = stops
+      .filter((e) => e.pending)
+      .map(label)
+      .filter(Boolean);
+    if (pending.length) notes.push(T.notes.stopPending(pending));
+    const failedStops = stops
+      .filter((e) => e.failed && !e.pending)
+      .map(label)
+      .filter(Boolean);
     if (failedStops.length) notes.push(T.notes.stopNotApplied(failedStops));
     const devices = this.discoveredDevices();
     const ids = new Set(devices.map((d) => d.external_id));
@@ -955,8 +1063,9 @@ export class MaxCubeApp {
 
   /**
    * A stop arrives: the commands of its room not yet written that arrived
-   * before it are cancelled, a read in flight is cut, then it runs in the
-   * stop lane.
+   * before it are cancelled, then it runs at once (never behind another
+   * command or another stop: the priority queue of the connection orders
+   * the writes).
    */
   queueStop(job) {
     const room = this.roomOf(job.parsed);
@@ -973,46 +1082,93 @@ export class MaxCubeApp {
     if (this.active && !this.active.written && sameTarget(this.active)) {
       this.active.cancelled = true;
     }
-    this.preempt();
-    const run = this.stops.then(() => this.runStop(job));
-    this.stops = run.then(noop, noop);
-    return run;
+    return this.runStop(job);
   }
 
-  /** A read in flight (of the loop or of a command) is cut: the stop needs the line now. */
-  preempt() {
-    const connection = this.connection;
-    if (!connection || connection.closed) return;
-    if (connection.inFlight === 'L' || connection.stalled(TIMEOUTS.STALL, this.monotonic())) {
-      if (this.active && !this.active.written) this.active.cancelled = true;
-      this.logger.info('A read in flight is cut for a stop');
-      this.dropConnection({ preempted: true });
+  /**
+   * Makes way for a stop, within `deadline`: a read (`l:`) without an answer
+   * for 1 s, or a greeting that has not come for 1 s, is cut (the Cube
+   * answers `l:` from its memory in a few ms: a younger one is waited for);
+   * an exchange already written (`s:`) is waited for in the queue.
+   */
+  async clearWay(deadline) {
+    for (;;) {
+      const mono = this.monotonic();
+      const connection = this.connection;
+      const greeting = this.openingConnection;
+      if (greeting && mono - this.openingSince >= STOP_CUT_AFTER_MS) {
+        this.logger.info('A greeting that does not come is cut for a stop');
+        greeting.close({ preempted: true });
+        return;
+      }
+      if (connection && !connection.closed && connection.inFlight === 'L') {
+        if (connection.stalled(STOP_CUT_AFTER_MS, mono)) {
+          if (this.active && !this.active.written) this.active.cancelled = true;
+          this.logger.info('A read without answer is cut for a stop');
+          this.dropConnection({ preempted: true });
+          return;
+        }
+      } else if (!greeting) {
+        return;
+      }
+      if (mono + STOP_POLL_MS > deadline) return;
+      await new Promise((resolve) => this.timers.setTimeout(resolve, STOP_POLL_MS));
     }
   }
 
-  /** The stop: identity only, sent with priority, within its own budget. */
+  /**
+   * The stop: identity only, written with priority. Anything that keeps it
+   * from being written (a connection refused or closed, a greeting that does
+   * not come, a queue dropped behind an `s:` without answer) is tried again
+   * on a new connection, every 250 ms, until its 3.5 s budget; past it, the
+   * stop is kept and sent by the next read (5 s later), never dropped.
+   */
   async runStop(job) {
     if (job.generation !== this.generation || !this.config.cube) {
       throw new Error(T.errors.configChanged);
     }
     const deadline = job.received + COMMAND_BUDGET_MS;
-    // Its turn may come after another stop: cut again what started meanwhile.
-    this.preempt();
+    let last;
+    for (;;) {
+      const started = this.monotonic();
+      if (deadline - started < STOP_MIN_TRY_MS) break;
+      try {
+        return await this.tryStop(job, deadline);
+      } catch (err) {
+        if (!err?.retryable) throw err;
+        last = err;
+      }
+      if (job.generation !== this.generation) throw new Error(T.errors.configChanged);
+      const wait = started + STOP_RETRY_MS - this.monotonic();
+      if (wait > 0 && this.monotonic() + wait + STOP_MIN_TRY_MS <= deadline) {
+        await new Promise((resolve) => this.timers.setTimeout(resolve, wait));
+      }
+    }
+    if (job.internal) throw refusal(T.errors.stopPending, last);
+    this.logger.warn(
+      `A stop for a ${job.parsed.kind} could not leave in time: kept for the next read`,
+    );
+    this.keepPendingStop(job);
+    throw refusal(T.errors.stopPending, last);
+  }
+
+  /** One try of a stop; an error before the write is `retryable`. */
+  async tryStop(job, deadline) {
+    const retry = (err) => Object.assign(err ?? new Error('retry'), { retryable: true });
+    await this.clearWay(deadline);
     this.uses += 1;
     let handedOff = false;
     try {
       let connection;
       try {
-        const left = deadline - COMMAND_MIN_SEND_MS / 2 - this.monotonic();
-        if (left < 1) throw Object.assign(new Error('late'), { kind: ERROR_KINDS.LATE });
-        // An opening in progress (one client only) is waited for, within the budget.
+        const left = deadline - this.monotonic();
         ({ connection } = await this.within(
           this.acquire(Math.min(TIMEOUTS.CONNECT, left)),
-          left,
+          Math.max(1, left),
           'late',
         ));
       } catch (err) {
-        throw refusal(T.errors.stopNotSent(err), err);
+        throw retry(err);
       }
       if (job.generation !== this.generation) throw new Error(T.errors.configChanged);
       const item = this.model?.devices.find(
@@ -1177,6 +1333,8 @@ export class MaxCubeApp {
       priority,
       beforeSend: () => {
         if (job.cancelled) throw new Error(T.errors.cancelledByStop);
+        // A resent stop leaves only while it is still the newest command of its room.
+        if (job.guard && !job.guard()) throw new Error(T.errors.supersededStop);
         if (job.generation !== this.generation || !this.config.cube) {
           throw new Error(T.errors.configChanged);
         }
@@ -1205,7 +1363,9 @@ export class MaxCubeApp {
     this.timers.clearTimeout(handle);
     if (writtenAt !== undefined && job.generation === this.generation) {
       // A new command for this device replaces what was expected of the last one.
-      this.expectations.set(plan.item.serial, {
+      // The write reaches the room: it replaces what the room expected.
+      this.expectations.set(this.targetKey(plan.item.kind, plan.item.serial, plan.item.roomId), {
+        serial: plan.item.serial,
         kind: plan.item.kind,
         action: job.command.action,
         ...plan.expect,
@@ -1233,14 +1393,25 @@ export class MaxCubeApp {
           this.logger.warn(`${plan.label} not confirmed: ${err?.kind ?? 'error'}`);
         },
       );
-      if (writtenAt === undefined) throw new Error(T.errors.notSent({ kind: ERROR_KINDS.TIMEOUT }));
+      if (writtenAt === undefined) {
+        const failure = new Error(T.errors.notSent({ kind: ERROR_KINDS.TIMEOUT }));
+        if (job.command.protective) failure.retryable = true;
+        throw failure;
+      }
       this.logger.info(`${plan.label} sent, the Cube has not answered yet`);
       throw new Error(T.errors.unconfirmed({ kind: ERROR_KINDS.TIMEOUT }));
     }
     const { err } = outcome;
     if (job.cancelled && writtenAt === undefined) throw new Error(T.errors.cancelledByStop);
-    if (err?.message === T.errors.configChanged) throw err;
-    if (err?.notSent || writtenAt === undefined) throw refusal(T.errors.notSent(err), err);
+    if (err?.message === T.errors.configChanged || err?.message === T.errors.supersededStop) {
+      throw err;
+    }
+    if (err?.notSent || writtenAt === undefined) {
+      const failure = refusal(T.errors.notSent(err), err);
+      // A stop not written is tried again (runStop), within its budget.
+      if (job.command.protective) failure.retryable = true;
+      throw failure;
+    }
     if (err?.kind === ERROR_KINDS.REJECTED) {
       this.noteAnswer(err.answer);
       throw refusal(T.errors.rejected, err);

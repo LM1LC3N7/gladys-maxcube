@@ -94,28 +94,41 @@ thermostat (the thermostats of a room are linked).
 
 Off puts the thermostat in manual at **4.5 °C**, the "off" setpoint of MAX!
 (valve closed). It needs **no option**, no bounds and no values of the
-device: only the device in the list of the Cube. It is always sent (no effect
-when already off). It goes **before** the other commands: a read in progress
-is cut (the connection is closed and a new one opened); the commands of the
-same room asked before it and not sent yet are cancelled ("cancelled: a stop
-was asked"); it only waits for the answer to a command already sent (2 s at
-most). The thermostat applies its own frost protection as described by eQ-3:
-check the manual of your device before leaving a radiator off in winter.
+device: only the device in the list of the Cube. It is sent even when the
+device seems off already. It goes **before** the other commands:
 
-Off is **not sent** when: the address of the Cube is not set or the
+- the commands of the same room asked before it and not sent yet are
+  cancelled ("cancelled: a stop was asked");
+- a read of the Cube without answer for 1 s, or a connection whose greeting
+  has not come for 1 s, is cut (a younger read is waited for: the Cube
+  answers it in a few milliseconds);
+- it only waits for the answer to a command already sent (2 s at most);
+- after a connection is closed, it waits for the Cube to free its slot (it
+  accepts one client), then opens again; whatever keeps it from leaving (a
+  connection refused or closed, a greeting that does not come, a previous
+  command without answer) is tried again every 250 ms, within the 3.5 s that
+  follow the command.
+
+The thermostat applies its own frost protection as described by eQ-3: check
+the manual of your device before leaving a radiator off in winter.
+
+An off command that could not leave within these 3.5 s **is not dropped**:
+Gladys answers "not sent yet", the status of the integration says so, and it
+leaves at the next read of the Cube (5 s later), 3 tries at most. Off is
+**refused** only when: the address of the Cube is not set or the
 configuration is not loaded yet; the configuration changes during the
-command; the Cube cannot be reached (or another connection in progress does
-not open) within the 3.5 s that follow the command; the device is no longer
-paired with the Cube. Once sent, it can be **discarded by the Cube** (radio
-budget of the hour used up, or no free slot) or **queued** by it; Gladys says
-so.
+command; the device is no longer paired with the Cube. Once sent, it can be
+**discarded by the Cube** (radio budget of the hour used up, or no free slot)
+or **queued** by it; Gladys says so.
 
 It is then **checked**: the Cube is read again 5 s, 30 s, 1 min and 2 min
 after it. When the thermostat does not show it 1 min after the send, it is
-sent again, 3 times at most (not while the fresh radio budget of the Cube is at
-90 % or more); when it is still not applied 2 min after the last send, the logs
-and the status of the integration say so ("the stop was not applied by ..."),
-until the device shows it or another command replaces it.
+sent again, 3 times at most (not while the fresh radio budget of the Cube is
+at 90 % or more); when it is still not applied 2 min after the last send
+(radio budget included), the logs and the status of the integration say so
+("the stop was not applied by ..."), until the device shows it. A newer
+command sent to the same room (setpoint, heating, auto) replaces the stop: it
+is then no longer sent again.
 
 ### Setpoint, heating, auto
 

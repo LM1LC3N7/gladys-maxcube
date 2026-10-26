@@ -62,8 +62,13 @@ test/fixtures/cube.js  the messages of the protocol documentation and our encode
 - **One connection** to the Cube at a time (it accepts one client): never a
   second `openConnection` while one is in progress or open.
 - **Off is protective** (manual 4.5 °C): never behind an option, bounds,
-  values, a read in flight or a command not yet written; it waits only for
-  the answer to a command already written. Never make it depend on more.
+  values or a command not yet written; a read or greeting silent for 1 s is
+  cut; it waits only for the answer to a command already written; an error
+  before the write is tried again within its budget, and past it the stop
+  is kept for the next read, never dropped. Never make it depend on more.
+- **One client slot on the Cube**: a new connection waits for the old
+  socket to close (`settleClose`); test the stop on a one-client server
+  (`test/stop.test.js`).
 - **Setpoint, auto and heating** stay behind `allow_setpoint` / `allow_mode`
   (off by default), checked at arrival and just before sending, decided on
   valid live values asked just before. The setpoint is 5-30 °C by half

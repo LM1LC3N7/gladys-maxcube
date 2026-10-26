@@ -58,7 +58,9 @@ test('the greeting: the Cube and its devices in Discovery, no value before creat
   const { gladys, cube, start } = await setup();
   await start();
   assert.equal(cube.connections.length, 1);
-  assert.deepEqual(cube.addresses[0], { host: '192.168.1.40', port: 62910, timeoutMs: 3000 });
+  assert.equal(cube.addresses[0].host, '192.168.1.40');
+  assert.equal(cube.addresses[0].port, 62910);
+  assert.ok(Math.abs(cube.addresses[0].timeoutMs - 3000) < 1);
   const discovered = gladys.fake.discoveredDevices;
   assert.deepEqual(
     discovered.map((d) => d.external_id).sort(),

@@ -51,6 +51,9 @@ export async function setup({
     monotonic: () => clock.now + (drift += 0.001),
     timers,
     store,
+    // The fake Cube frees its slot at once: no wait on the virtual clock.
+    // (The real-TCP tests keep the default, on a Cube with one client slot.)
+    reopenDelayMs: 0,
   });
   registerHandlers(gladys, app, logger);
   /** Gladys connects: the app starts and reads the Cube at once (when due). */

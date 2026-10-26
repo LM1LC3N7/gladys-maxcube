@@ -112,7 +112,14 @@ export class CubeConnection {
     /** When the exchange in flight was written (monotonic), or undefined. */
     this.busySince = undefined;
     socket.on('data', (data) => this.onData(data));
-    socket.on('close', () => this.onClose());
+    /** Resolves once the socket is really closed (the Cube sees our slot free). */
+    this.socketClosed = new Promise((resolve) => {
+      this.markSocketClosed = resolve;
+    });
+    socket.on('close', () => {
+      this.markSocketClosed();
+      this.onClose();
+    });
   }
 
   // --- Reading lines ----------------------------------------------------------------
@@ -418,6 +425,15 @@ export class CubeConnection {
     return answer;
   }
 
+  /** Resolves when the socket is closed, or after `ms` at the latest. */
+  whenClosed(ms) {
+    let handle;
+    const limit = new Promise((resolve) => {
+      handle = this.timers.setTimeout(resolve, ms);
+    });
+    return Promise.race([this.socketClosed, limit]).finally(() => this.timers.clearTimeout(handle));
+  }
+
   /** Whether the exchange in flight has had no answer for `ms` (monotonic). */
   stalled(ms, mono = this.monotonic()) {
     return this.busySince !== undefined && mono - this.busySince >= ms;
@@ -430,12 +446,21 @@ export class CubeConnection {
  */
 export async function openConnection(
   address,
-  { connect = tcpConnect, timeoutMs = TIMEOUTS.CONNECT, timers, monotonic, onPush } = {},
+  {
+    connect = tcpConnect,
+    timeoutMs = TIMEOUTS.CONNECT,
+    timers,
+    monotonic,
+    onPush,
+    onConnection,
+  } = {},
 ) {
   const mono = monotonic ?? (() => performance.now());
   const started = mono();
   const socket = await connect(address, { timeoutMs });
   const connection = new CubeConnection(socket, { timers, monotonic: mono, onPush });
+  // The caller may cut a greeting that does not come (a stop needs the line).
+  onConnection?.(connection);
   try {
     const left = timeoutMs - (mono() - started);
     if (left < 1) throw new CubeError(ERROR_KINDS.TIMEOUT, 'no greeting in time');

@@ -60,7 +60,7 @@ test('r1-1: the stop is sent to a device not heard yet, or whose entry is not va
 // --- 3. A command asked before a stop never leaves after it -------------------------
 
 test('r1-3: commands of the room not written yet are cancelled by a stop; later ones pass', async () => {
-  const { gladys, cube, start, createAll } = await setup({ config: ALLOW });
+  const { gladys, cube, start, createAll, advance } = await setup({ config: ALLOW });
   await start();
   await createAll();
   cube.ignoreList = true;
@@ -70,6 +70,8 @@ test('r1-3: commands of the room not written yet are cancelled by a stop; later 
   await settle();
   cube.ignoreList = false;
   const stop = command(gladys, 'thermostat', TRV.serial, 'mode', 0);
+  // The read without answer is cut after 1 s.
+  await advance(1100);
   const [a, b, c] = await Promise.all([setpoint, heating, stop]);
   assert.match(a.error, /Cancelled: a stop was asked/);
   assert.match(b.error, /Cancelled: a stop was asked/);
@@ -429,7 +431,9 @@ test('r1-2: a stop arriving behind a read that stalls: the read is cut, no failu
   cube.ignoreList = true;
   await advance(MINUTE);
   cube.ignoreList = false;
-  const ack = await command(gladys, 'thermostat', TRV.serial, 'mode', 0);
+  const pending = command(gladys, 'thermostat', TRV.serial, 'mode', 0);
+  await advance(1100);
+  const ack = await pending;
   assert.deepEqual(ack, { success: true });
   assert.equal(cube.connections.length, 2);
   await settle();
@@ -453,4 +457,57 @@ test('r1-2: keep_connection off, the loop never closes a connection a command us
   assert.equal(cube.peak, 1);
   await settle();
   assert.equal(cube.open, 0, 'closed once unused');
+});
+
+// --- Review r2 --------------------------------------------------------------------------
+
+test('r2-2: a newer command written to the room replaces the stop: never sent again', async () => {
+  const { gladys, cube, start, createAll, wait } = await setup({ config: ALLOW });
+  await start();
+  await createAll();
+  assert.deepEqual(await command(gladys, 'thermostat', TRV.serial, 'mode', 0), { success: true });
+  await wait(10 * SECOND);
+  // Heating on the wall thermostat of the same room (the command reaches the room).
+  assert.deepEqual(await command(gladys, 'wall', WALL.serial, 'mode', 1), { success: true });
+  for (let i = 0; i < 18; i += 1) await wait(10 * SECOND);
+  assert.deepEqual(cube.sent.map(byteOf), [0x49, 0x40 | 40], 'no stop after the heating');
+});
+
+test('r2-3: a stop held by the radio budget is said after 2 min all the same', async () => {
+  const cube = createFakeCube();
+  cube.dutyCycle = 0x5f;
+  const { gladys, start, createAll, wait, logger } = await setup({ cube });
+  await start();
+  await createAll();
+  assert.deepEqual(await command(gladys, 'thermostat', TRV.serial, 'mode', 0), { success: true });
+  for (let i = 0; i < 15; i += 1) await wait(10 * SECOND);
+  assert.equal(cube.sent.length, 1, 'not sent again at 95 %');
+  assert.ok(
+    logger.lines.some((l) => /not applied \(1 send\(s\), radio budget of the Cube\)/.test(l)),
+  );
+  assert.match(status(gladys).message.fr, /L’arrêt n’a pas été appliqué par/);
+});
+
+test('r2-1: a stop that cannot leave in its budget is kept and sent by the next read', async () => {
+  const cube = createFakeCube();
+  const { gladys, start, createAll, advance, wait } = await setup({ cube });
+  await start();
+  await createAll();
+  cube.dropAll();
+  cube.refuse = true;
+  const pending = command(gladys, 'thermostat', TRV.serial, 'mode', 0);
+  await advance(4000);
+  const ack = await pending;
+  assert.match(ack.error, /Stop not sent yet/);
+  assert.match(
+    status(gladys).message.fr,
+    /Un arrêt n’a pas encore pu être envoyé à : Living room - Radiator/,
+  );
+  assert.equal(cube.sent.length, 0);
+  cube.refuse = false;
+  await wait(5 * SECOND);
+  await wait(SECOND);
+  assert.equal(cube.sent.length, 1);
+  assert.equal(byteOf(cube.sent[0]), 0x49);
+  assert.doesNotMatch(status(gladys).message.fr, /pas encore pu être envoyé/);
 });

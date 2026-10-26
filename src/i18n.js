@@ -115,6 +115,10 @@ export const T = {
       en: `${n} ${plural(n, 'device gives', 'devices give')} values the Cube marks as not valid: they are not shown.`,
       fr: `${n} ${plural(n, 'appareil donne', 'appareils donnent')} des valeurs que le Cube marque comme non valables : elles ne sont pas affichées.`,
     }),
+    stopPending: (names) => ({
+      en: `A stop could not be sent yet to: ${names.join(', ')}. It leaves at the next read of the Cube.`,
+      fr: `Un arrêt n’a pas encore pu être envoyé à : ${names.join(', ')}. Il part à la prochaine lecture du Cube.`,
+    }),
     stopNotApplied: (names) => ({
       en: `The stop was not applied by: ${names.join(', ')} (sent ${STOP_SENDS} times). Check the device (batteries, radio range).`,
       fr: `L’arrêt n’a pas été appliqué par : ${names.join(', ')} (envoyé ${STOP_SENDS} fois). Vérifiez l’appareil (piles, portée radio).`,
@@ -174,8 +178,9 @@ export const T = {
     notConfigured: 'The address of the Cube is not set',
     notLoaded: 'The configuration of the integration is not loaded yet: try again in a moment',
     cancelledByStop: 'Cancelled: a stop was asked for this room meanwhile. Command not sent',
-    stopNotSent: (err) =>
-      `Stop not sent: the Cube could not be reached within the time Gladys waits (${reasonOf(err).en})`,
+    stopPending:
+      'Stop not sent yet: the Cube did not take it in time. It leaves at the next read of the Cube (in about 5 s, 3 tries at most): check the radiator',
+    supersededStop: 'A newer command was sent to this room: the stop is not sent again',
     notUsable:
       'The Cube marks the values of this device as not valid, or reports a radio link error: command not sent',
     offNeedsMode:

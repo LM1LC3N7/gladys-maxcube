@@ -40,10 +40,13 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (MaxCubeApp)
   and numbers). Values are shown only from valid, initialized entries
   without a radio link error.
 - **Commands**, all to the room as the MAX! software does. **Off** (manual
-  4.5 °C, the valve closed) is protective: no option, identity only, always
-  sent; it cuts a read in flight (a new connection), cancels the commands of
-  its room not written yet, waits only for the answer to a command already
-  written, and is checked on the follow-up reads (sent again up to 3 times).
+  4.5 °C, the valve closed) is protective: no option, identity only, sent
+  even when the device seems off; it cancels the commands of its room not
+  written yet, goes ahead of every waiting exchange, cuts a read or a
+  greeting silent for 1 s, reopens only once the old connection is closed
+  (one client slot), is tried again every 250 ms within its budget, is kept
+  and sent by the next read past it, and is checked on the follow-up reads
+  (sent again up to 3 times, unless a newer command of the room replaced it).
   The setpoint (`allow_setpoint`: 5-30 °C by half degrees within the bounds
   of every thermostat of the room) and auto / heating (`allow_mode`) are off
   by default; they are decided on the live values asked just before, refused

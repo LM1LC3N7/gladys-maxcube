@@ -101,30 +101,42 @@ en chauffage ou en auto. Comme le logiciel MAX!, chaque commande est envoyée à
 
 L'arrêt met le thermostat en manuel à **4,5 °C**, la consigne « arrêt » de
 MAX! (vanne fermée). Il ne demande **aucune option**, ni bornes, ni valeurs de
-l'appareil : seulement l'appareil dans la liste du Cube. Il est toujours
-envoyé (sans effet s'il est déjà à l'arrêt). Il passe **avant** les autres
-commandes : une lecture en cours est coupée (la connexion est fermée et une
-nouvelle est ouverte) ; les commandes de la même pièce demandées avant lui et
-pas encore envoyées sont annulées (« annulée : un arrêt a été demandé ») ; il
-n'attend que la réponse d'une commande déjà envoyée (2 s au plus). Le
-thermostat applique sa propre protection hors-gel telle que décrite par eQ-3 :
-vérifiez la notice de votre appareil avant de laisser un radiateur à l'arrêt
-en hiver.
+l'appareil : seulement l'appareil dans la liste du Cube. Il est envoyé même
+s'il semble déjà à l'arrêt. Il passe **avant** les autres commandes :
 
-L'arrêt **n'est pas envoyé** quand : l'adresse du Cube n'est pas saisie ou la
+- les commandes de la même pièce demandées avant lui et pas encore envoyées
+  sont annulées (« annulée : un arrêt a été demandé ») ;
+- une lecture du Cube sans réponse depuis 1 s, ou une connexion dont
+  l'accueil du Cube n'arrive pas depuis 1 s, est coupée (une lecture plus
+  récente est attendue : le Cube y répond en quelques millisecondes) ;
+- il n'attend que la réponse d'une commande déjà envoyée (2 s au plus) ;
+- après une connexion fermée, il attend que le Cube libère sa place (il
+  n'accepte qu'un client), puis rouvre ; tout ce qui l'empêche de partir
+  (connexion refusée ou fermée, accueil qui ne vient pas, commande précédente
+  sans réponse) est réessayé toutes les 250 ms, dans les 3,5 s qui suivent la
+  commande.
+
+Le thermostat applique sa propre protection hors-gel telle que décrite par
+eQ-3 : vérifiez la notice de votre appareil avant de laisser un radiateur à
+l'arrêt en hiver.
+
+Un arrêt qui n'a pas pu partir dans ces 3,5 s **n'est pas abandonné** : Gladys
+répond « pas encore envoyé », l'état de l'intégration le dit, et il part à la
+lecture suivante du Cube (5 s plus tard), 3 essais au plus. L'arrêt est
+**refusé** seulement quand : l'adresse du Cube n'est pas saisie ou la
 configuration n'est pas encore chargée ; la configuration change pendant la
-commande ; le Cube ne peut pas être joint (ou une autre connexion en cours ne
-s'ouvre pas) dans les 3,5 s qui suivent la commande ; l'appareil n'est plus
-appairé au Cube. Une fois envoyé, il peut être **rejeté par le Cube** (budget
-radio de l'heure épuisé ou plus d'emplacement libre) ou **mis en attente** par
-lui ; Gladys le dit.
+commande ; l'appareil n'est plus appairé au Cube. Une fois envoyé, il peut
+être **rejeté par le Cube** (budget radio de l'heure épuisé ou plus
+d'emplacement libre) ou **mis en attente** par lui ; Gladys le dit.
 
 Il est ensuite **vérifié** : le Cube est relu 5 s, 30 s, 1 min et 2 min après.
 Si le thermostat ne montre pas l'arrêt 1 min après l'envoi, il est renvoyé, 3
 fois au plus (pas quand le budget radio frais du Cube atteint 90 %) ; s'il ne
-l'a toujours pas appliqué 2 min après le dernier envoi, les journaux et l'état
-de l'intégration le disent (« l'arrêt n'a pas été appliqué par … »), jusqu'à
-ce que l'appareil le montre ou qu'une autre commande le remplace.
+l'a toujours pas appliqué 2 min après le dernier envoi (budget radio compris),
+les journaux et l'état de l'intégration le disent (« l'arrêt n'a pas été
+appliqué par … »), jusqu'à ce que l'appareil le montre. Une commande plus
+récente envoyée à la même pièce (consigne, chauffage, auto) remplace l'arrêt :
+il n'est alors plus renvoyé.
 
 ### Consigne, chauffage, auto
 
