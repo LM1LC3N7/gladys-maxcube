@@ -1,177 +1,115 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "name": "Demo Devices Template",
+  "name": "MAX! Cube",
   "description": {
-    "en": "Starter template showing sensors, a switch, a dimmable light and a smart plug.",
-    "fr": "Template de démarrage : capteurs, interrupteur, lampe variable et prise connectée."
+    "en": "Unofficial: eQ-3 MAX! Cube on your network: radiator and wall thermostats, window contacts.",
+    "fr": "Non officiel : MAX! Cube eQ-3 en local : thermostats de radiateur et muraux, contacts de fenêtre."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/gladysassistant/integration-template-js:1.0.0",
+  "version": "0.1.0",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-maxcube:0.1.0",
   "gladys_version": ">=5.1.0",
-  "cover_image": "https://raw.githubusercontent.com/GladysAssistant/integration-template-js/master/cover.png",
-  "categories": ["lighting", "security", "environment"],
-  "transports": ["local", "cloud"],
+  "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-maxcube/main/cover.png",
+  "categories": ["climate"],
+  "transports": ["local"],
   "config_schema": [
     {
       "key": "intro",
       "type": "section",
-      "label": { "en": "Getting started", "fr": "Pour commencer" },
+      "label": { "en": "How it works", "fr": "Fonctionnement" },
       "description": {
-        "en": "The demo weather station reads real data from the free Open-Meteo API: pick the coordinates to observe. No account, no API key.",
-        "fr": "La station météo de démonstration lit de vraies données via l'API gratuite Open-Meteo : choisissez les coordonnées à observer. Pas de compte, pas de clé d'API."
+        "en": "Unofficial integration, not affiliated with eQ-3. Gladys reads your MAX! Cube through its local port (62910), on your network, without any cloud: every minute, the temperature, the setpoint, the mode, the valve opening and the battery of the radiator thermostats, the temperature and setpoint of the wall thermostats, the open / closed state of the window contacts. The setpoint and the mode can be commanded, each behind an option off by default. A Cube accepts one client at a time: close the MAX! software while Gladys uses it, or untick \"Keep the connection open\". Never tested with a real Cube: see the documentation.",
+        "fr": "Intégration non officielle, sans lien avec eQ-3. Gladys lit votre MAX! Cube par son port local (62910), sur votre réseau, sans cloud : chaque minute, la température, la consigne, le mode, l’ouverture de la vanne et la pile des thermostats de radiateur, la température et la consigne des thermostats muraux, l’état ouvert / fermé des contacts de fenêtre. La consigne et le mode peuvent être commandés, chacun derrière une option désactivée par défaut. Un Cube accepte un seul client à la fois : fermez le logiciel MAX! pendant que Gladys l’utilise, ou décochez « Garder la connexion ouverte ». Jamais testée avec un vrai Cube : voir la documentation."
       },
       "links": [
         {
-          "url": "https://open-meteo.com/en/docs",
-          "label": { "en": "Open-Meteo documentation", "fr": "Documentation Open-Meteo" }
+          "url": "https://github.com/LM1LC3N7/gladys-maxcube/blob/main/docs/fr.md",
+          "label": { "en": "Guide (French)", "fr": "Guide (français)" }
+        },
+        {
+          "url": "https://github.com/LM1LC3N7/gladys-maxcube/blob/main/docs/en.md",
+          "label": { "en": "Guide (English)", "fr": "Guide (anglais)" }
         }
       ]
     },
     {
-      "key": "latitude",
-      "type": "number",
-      "label": { "en": "Latitude", "fr": "Latitude" },
-      "description": {
-        "en": "Latitude used for the demo weather sensor.",
-        "fr": "Latitude utilisée par le capteur météo de démonstration."
-      },
-      "placeholder": { "en": "e.g. 48.8566", "fr": "ex. 48.8566" },
+      "key": "host",
+      "type": "string",
       "required": true,
-      "default": 48.8566,
-      "min": -90,
-      "max": 90
+      "label": { "en": "Cube address", "fr": "Adresse du Cube" },
+      "description": {
+        "en": "The IP address (or name) of the MAX! Cube on your network, shown by your router or the MAX! software. Give it a fixed address in your router: the devices and their history are kept if it changes (they are known by their serial numbers). A port may follow (62910 by default). No password: the Cube asks for none on its local port.",
+        "fr": "L’adresse IP (ou le nom) du MAX! Cube sur votre réseau, visible dans votre box ou le logiciel MAX!. Donnez-lui une adresse fixe dans votre box : les appareils et leur historique sont gardés si elle change (ils sont reconnus par leur numéro de série). Un port peut suivre (62910 par défaut). Pas de mot de passe : le Cube n’en demande pas sur son port local."
+      },
+      "placeholder": { "en": "e.g. 192.168.1.40", "fr": "ex. 192.168.1.40" }
     },
     {
-      "key": "longitude",
-      "type": "number",
-      "label": { "en": "Longitude", "fr": "Longitude" },
+      "key": "options_section",
+      "type": "section",
+      "label": { "en": "Commands (off by default)", "fr": "Commandes (désactivées par défaut)" },
       "description": {
-        "en": "Longitude used for the demo weather sensor.",
-        "fr": "Longitude utilisée par le capteur météo de démonstration."
-      },
-      "placeholder": { "en": "e.g. 2.3522", "fr": "ex. 2.3522" },
-      "required": true,
-      "default": 2.3522,
-      "min": -180,
-      "max": 180
+        "en": "By default Gladys only reads. Once an option is ticked, the dashboard, the scenes, the voice assistants (Siri / HomeKit, Alexa, Google Home) and the Thermostat service of Gladys can act. Each command asks the Cube for its live values just before acting. A setpoint goes to the whole room of the thermostat, as the MAX! software does. The weekly programme, the boost and the vacation mode stay in the MAX! software.",
+        "fr": "Par défaut Gladys ne fait que lire. Une fois une option cochée, le tableau de bord, les scènes, les assistants vocaux (Siri / HomeKit, Alexa, Google Home) et le service Thermostat de Gladys peuvent agir. Chaque commande demande au Cube ses valeurs courantes juste avant d’agir. Une consigne s’applique à toute la pièce du thermostat, comme le fait le logiciel MAX!. Le programme hebdomadaire, le boost et le mode vacances restent dans le logiciel MAX!."
+      }
     },
     {
-      "key": "unit",
+      "key": "allow_setpoint",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "label": { "en": "Allow the setpoint commands", "fr": "Autoriser les commandes de consigne" },
+      "description": {
+        "en": "The setpoint of a radiator or wall thermostat: 5 to 30 °C by half degrees, within the bounds set on the device. A value outside is refused, never brought back into the bounds.",
+        "fr": "La consigne d’un thermostat de radiateur ou mural : de 5 à 30 °C par demi-degré, dans les bornes réglées sur l’appareil. Une valeur en dehors est refusée, jamais ramenée dans les bornes."
+      }
+    },
+    {
+      "key": "allow_mode",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "label": { "en": "Allow the mode commands", "fr": "Autoriser les commandes de mode" },
+      "description": {
+        "en": "The mode of a thermostat: auto (the weekly programme of the device), heating (a fixed setpoint), off (the valve closed: the setpoint 4.5 °C of MAX!). The thermostat applies its own frost protection as described by eQ-3: check the manual of your device before leaving a radiator off in winter.",
+        "fr": "Le mode d’un thermostat : auto (le programme hebdomadaire de l’appareil), chauffage (une consigne fixe), arrêt (la vanne fermée : la consigne 4,5 °C de MAX!). Le thermostat applique sa propre protection hors-gel telle que décrite par eQ-3 : vérifiez la notice de votre appareil avant de laisser un radiateur à l’arrêt en hiver."
+      }
+    },
+    {
+      "key": "keep_connection",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "label": { "en": "Keep the connection open", "fr": "Garder la connexion ouverte" },
+      "description": {
+        "en": "Ticked: one connection to the Cube is kept, and a device that reports is shown at once; the MAX! software cannot connect meanwhile (a Cube accepts one client). Unticked: a connection is opened and closed for each read and each command, so the MAX! software can connect in between.",
+        "fr": "Cochée : une connexion au Cube est gardée, et un appareil qui se signale est affiché aussitôt ; le logiciel MAX! ne peut pas se connecter pendant ce temps (un Cube accepte un seul client). Décochée : une connexion est ouverte puis fermée pour chaque lecture et chaque commande, et le logiciel MAX! peut se connecter entre-temps."
+      }
+    },
+    {
+      "key": "language",
       "type": "select",
-      "label": { "en": "Temperature unit", "fr": "Unité de température" },
       "required": false,
-      "default": "celsius",
-      "options": [
-        { "value": "celsius", "label": { "en": "Celsius", "fr": "Celsius" } },
-        { "value": "fahrenheit", "label": { "en": "Fahrenheit", "fr": "Fahrenheit" } }
-      ]
-    },
-    {
-      "key": "poll_frequency",
-      "type": "number",
-      "label": { "en": "Refresh interval (s)", "fr": "Intervalle de rafraîchissement (s)" },
+      "default": "fr",
+      "label": { "en": "Language of the devices", "fr": "Langue des appareils" },
       "description": {
-        "en": "How often sensors are polled, in seconds (one minute minimum).",
-        "fr": "Fréquence d'interrogation des capteurs, en secondes (une minute minimum)."
+        "en": "Names of the devices and features.",
+        "fr": "Noms des appareils et des fonctionnalités."
       },
-      "required": false,
-      "default": 300,
-      "min": 60,
-      "max": 3600
+      "options": [
+        { "value": "fr", "label": { "en": "French", "fr": "Français" } },
+        { "value": "en", "label": { "en": "English", "fr": "Anglais" } }
+      ]
     }
   ],
   "actions": [
     {
-      "key": "test_weather",
-      "label": { "en": "Test the weather provider", "fr": "Tester le fournisseur météo" },
-      "timeout_seconds": 30
-    },
-    {
-      "key": "identify",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ]
-    }
-  ],
-  "scene_triggers": [
-    {
-      "key": "motion_detected",
-      "label": { "en": "Motion detected", "fr": "Mouvement détecté" },
+      "key": "test_connection",
+      "timeout_seconds": 30,
+      "label": { "en": "Test the connection", "fr": "Tester la connexion" },
       "description": {
-        "en": "A demo motion sensor saw a person or an animal move.",
-        "fr": "Un détecteur de démonstration a vu bouger une personne ou un animal."
-      },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Sensor", "fr": "Détecteur" }
-        },
-        {
-          "key": "target",
-          "type": "multi_select",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" },
-          "options": [
-            { "value": "person", "label": { "en": "Person", "fr": "Personne" } },
-            { "value": "animal", "label": { "en": "Animal", "fr": "Animal" } }
-          ]
-        }
-      ],
-      "variables": [
-        {
-          "key": "target",
-          "type": "string",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" }
-        }
-      ]
-    }
-  ],
-  "scene_actions": [
-    {
-      "key": "identify_device",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "description": {
-        "en": "Make a device signal itself (the demo light blinks).",
-        "fr": "Fait se signaler un appareil (la lampe de démonstration clignote)."
-      },
-      "timeout_seconds": 15,
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ],
-      "outputs": [
-        {
-          "key": "signalled",
-          "type": "boolean",
-          "label": { "en": "Device signalled", "fr": "Appareil signalé" }
-        }
-      ]
-    }
-  ],
-  "widgets": [
-    {
-      "key": "demo_status",
-      "label": { "en": "Demo status", "fr": "État de la démo" },
-      "description": {
-        "en": "Live temperature and plug power, plug connection and observed location.",
-        "fr": "Température et puissance en direct, connexion de la prise, position observée."
-      },
-      "icon": "activity",
-      "action_timeout_seconds": 15
+        "en": "Reads the Cube now (a minute after the last read at the earliest, even during a retry pause) and lists what it shows.",
+        "fr": "Lit le Cube maintenant (une minute après la dernière lecture au plus tôt, même pendant une pause de nouvel essai) et liste ce qu’il montre."
+      }
     }
   ]
 }

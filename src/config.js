@@ -1,45 +1,65 @@
 // -----------------------------------------------------------------------------
-// Integration configuration.
-//
-// The configuration is filled in by the user in Gladys, from the `config_schema`
-// declared in `gladys-assistant-integration.json`. The SDK fetches it for you
-// (`gladys.getConfig()`) and notifies you of every change through
-// `gladys.onConfigUpdated()`.
-//
-// This module only provides defaults and normalizes the received object, so the
-// rest of the code never has to deal with `undefined`.
+// The configuration the user fills (manifest `config_schema`), normalized.
+// No secret: the Cube asks for no password on its local port.
 // -----------------------------------------------------------------------------
 
-// Defaults: they MUST stay consistent with the `default` values declared in the
-// `config_schema` of the manifest.
-export const DEFAULT_CONFIG = {
-  latitude: 48.8566, // Paris
-  longitude: 2.3522,
-  unit: 'celsius', // 'celsius' | 'fahrenheit'
-  // Seconds between two reads of the polled sensors. Gladys polls at most once
-  // a minute: slower intervals are applied by skipping polls (see
-  // createPoller in src/devices/index.js).
-  poll_frequency: 300,
-  // Reserved key (NOT in config_schema): because the manifest declares both
-  // 'local' and 'cloud' in its `transports` field, Gladys shows a standard
-  // "Prefer the local connection" toggle and sends the user's choice here.
-  // Read-only for the integration; defaults to true.
-  GLADYS_PREFER_LOCAL: true,
+import { DEFAULT_PORT } from './constants.js';
+
+export const LANGUAGES = Object.freeze(['fr', 'en']);
+
+// Defaults: they MUST match the `default` values of the manifest.
+export const DEFAULTS = Object.freeze({
+  language: 'fr',
+  allow_setpoint: false,
+  allow_mode: false,
+  keep_connection: true,
+});
+
+const text = (value) => (typeof value === 'string' ? value.trim() : '');
+const bool = (value, fallback) => {
+  if (value === true || value === 'true' || value === 1 || value === '1') return true;
+  if (value === false || value === 'false' || value === 0 || value === '0') return false;
+  return fallback;
 };
 
 /**
- * Merge the user config with the defaults.
- * @param {Record<string, unknown>} raw config returned by the SDK
+ * The address of the Cube: `192.168.1.20`, `maxcube.local` or `host:port`
+ * (62910 by default, the only port of the Cube). A scheme, credentials, a
+ * path, a query and a fragment are refused (an address ends up in logs).
+ *   -> { host, port } or { error: 'empty' | 'invalid' | 'credentials' }
  */
+export function parseHost(value) {
+  const raw = text(value);
+  if (!raw) return { error: 'empty' };
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) return { error: 'invalid' };
+  if (raw.includes('@')) return { error: 'credentials' };
+  if (/[\s/?#\\]/.test(raw)) return { error: 'invalid' };
+  let url;
+  try {
+    url = new URL(`http://${raw}`);
+  } catch {
+    return { error: 'invalid' };
+  }
+  if (!url.hostname || url.pathname !== '/' || url.search || url.hash) return { error: 'invalid' };
+  const port = url.port ? Number(url.port) : DEFAULT_PORT;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: 'invalid' };
+  // An IPv6 address comes back in brackets: node:net wants it bare.
+  const host = url.hostname.replace(/^\[(.*)\]$/, '$1').toLowerCase();
+  return { host, port };
+}
+
 export function normalizeConfig(raw = {}) {
+  raw = raw ?? {};
+  const host = parseHost(raw.host);
+  const language = LANGUAGES.includes(String(raw.language))
+    ? String(raw.language)
+    : DEFAULTS.language;
   return {
-    ...DEFAULT_CONFIG,
-    ...raw,
-    // Force the types: config may arrive as strings from a form.
-    latitude: Number(raw.latitude ?? DEFAULT_CONFIG.latitude),
-    longitude: Number(raw.longitude ?? DEFAULT_CONFIG.longitude),
-    poll_frequency: Number(raw.poll_frequency ?? DEFAULT_CONFIG.poll_frequency),
-    // The preference is a boolean; anything but an explicit false means true.
-    GLADYS_PREFER_LOCAL: raw.GLADYS_PREFER_LOCAL !== false,
+    cube: host.error ? null : host,
+    hostError: host.error ?? null,
+    language,
+    allowSetpoint: bool(raw.allow_setpoint, DEFAULTS.allow_setpoint),
+    allowMode: bool(raw.allow_mode, DEFAULTS.allow_mode),
+    keepConnection: bool(raw.keep_connection, DEFAULTS.keep_connection),
   };
 }
